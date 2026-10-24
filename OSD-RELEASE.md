@@ -1,22 +1,19 @@
-# MPCVR-Plus OSD v1.0.1
+# MPCVR-Plus OSD v1.0.2
 
-## Fixed
+## Changes
 
-- Preserve valid audio bit-depth values reported by the playback graph,
-  including AAC and Opus, instead of suppressing them based on codec type.
-- Keep unavailable or invalid bit-depth values as N/A.
-- Reported compressed-stream bit depth does not establish the precision
-  of the original PCM recording.
+- Fix DVD LPCM audio identification and add release preparation helper
+- Read missing FLAC source bit depth from STREAMINFO
 
-## Validation
+## Accepted build
 
-- Playback display changes verified by the user.
-- Publication reuses the accepted successful OSD Plus build specified
-  in OSD-RELEASE.json without rebuilding the filters.
+- Source commit: `c675dc3cb29c859b9c1a7844c9b7bd29c64a1c08`
+- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/40058105699
+- Publication reuses this successful build without rebuilding the filters.
+- Confirm playback acceptance before committing these release files.
 
 ## Package
 
 Includes Win32 and x64 filters, English documentation, build provenance
-and a SHA-256 package checksum.
-
-Existing v1.0.0 functionality and limitations remain unchanged.
+and a SHA-256 package checksum. Existing functionality and limitations
+remain as documented in OSD-PLUS.md.

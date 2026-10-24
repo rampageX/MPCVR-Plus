@@ -84,7 +84,8 @@ function Prepare-Release([string]$runUrl) {
     $published = @()
     $page = 1
     do {
-        $batch = @(Get-GitHubJson "releases?per_page=100&page=$page")
+        $response = Get-GitHubJson "releases?per_page=100&page=$page"
+        $batch = @($response)
         foreach ($item in $batch) {
             if (!$item.draft -and !$item.prerelease -and $item.tag_name -match '^osd-v([0-9]+\.[0-9]+\.[0-9]+)$') {
                 $published += [pscustomobject]@{ Version = [version]$Matches[1]; Tag = [string]$item.tag_name }
