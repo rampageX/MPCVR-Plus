@@ -1,14 +1,15 @@
-# MPCVR-Plus OSD v1.0.2
+# MPCVR-Plus OSD v1.0.3
 
 ## Changes
 
-- Fix DVD LPCM audio identification and add release preparation helper
-- Read missing FLAC source bit depth from STREAMINFO
+- Identify Dolby TrueHD audio by media subtype
+- Expand OSD audio formats and recognize MPC-BE DTS-HD and Atmos profiles
+- Remove standalone audio validation files
 
 ## Accepted build
 
-- Source commit: `c675dc3cb29c859b9c1a7844c9b7bd29c64a1c08`
-- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/40058105699
+- Source commit: `d83cd803f88f6bb92bf31fbb56fd8bb46f8c2d77`
+- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/40106171049
 - Publication reuses this successful build without rebuilding the filters.
 - Confirm playback acceptance before committing these release files.
 
