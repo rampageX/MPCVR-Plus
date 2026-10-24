@@ -2,6 +2,7 @@
 #pragma once
 #include <mmreg.h>
 #include "AudioSelection.h"
+#include "AudioDepth.h"
 
 // MPC-BE AudioSwitcher/StreamSwitcher.h: read-only active-input identity.
 interface __declspec(uuid("DA395FA3-4A3E-4D85-805E-0BEFF53D4BCD")) IOsdStreamSwitcherInput : public IUnknown {
@@ -20,6 +21,11 @@ class COsdAudioInfo {
             if (ex->Samples.wValidBitsPerSample && ex->Samples.wValidBitsPerSample <= bits) bits = ex->Samples.wValidBitsPerSample;
         }
         std::wstring codec;
+        // Windows SDK wmcodecdsp.h subtypes. Some splitters use wFormatTag=0
+        // for these codecs, so the complete media subtype must take precedence.
+        static constexpr GUID ddplus = {0xa7fb87af,0x2d02,0x42fb,{0xa4,0xd4,0x05,0xcd,0x93,0x84,0x3b,0xdd}};
+        if (mt.subtype == ddplus) { codec = L"E-AC-3 (Dolby Digital Plus)"; tag = 0; }
+        if (codec.empty()) {
         switch (tag) {
         case 1: codec = L"PCM"; break;
         case 3: codec = L"Float PCM"; break;
@@ -34,9 +40,8 @@ class COsdAudioInfo {
         case 0x704f: codec = L"Opus"; break;
         default: codec = std::format(L"Audio 0x{:X}", tag); break;
         }
-        // Lossy compressed streams have no PCM bit depth. Never label an AAC
-        // container's placeholder wBitsPerSample as the source's effective depth.
-        if (tag != 1 && tag != 3 && tag != 0xf1ac && tag != 0x163 && tag != 0x92) bits = 0;
+        }
+        bits = OsdAudioDepth(tag, bits);
         const double rate = current ? current / 1000.0 : w->nAvgBytesPerSec * 8.0 / 1000.0;
         return std::format(L"{}, {} Hz, {} ch, {}, {}", codec, w->nSamplesPerSec, w->nChannels,
             bits ? std::format(L"{}-bit", bits) : L"depth N/A",

@@ -1,4 +1,5 @@
 #include "../AudioSelection.h"
+#include "../AudioDepth.h"
 #include <cassert>
 #include <iostream>
 
@@ -16,5 +17,12 @@ int main() {
         assert(SelectOsdAudioInput(states) == active);
     }
     assert(SelectOsdAudioInput({-1, 1, -1}) == 1);
+    assert(OsdAudioDepth(0x2001, 24) == 24); // DTS declaration is not discarded.
+    assert(OsdAudioDepth(0x2001, 0) == 0);   // Do not invent a missing DTS depth.
+    assert(OsdAudioDepth(0xff, 16) == 0);    // AAC placeholder is not source precision.
+    assert(OsdAudioDepth(0, 16) == 0);       // E-AC-3 without defined source depth.
+    assert(OsdAudioDepth(1, 24) == 24);
+    assert(OsdAudioDepth(3, 32) == 32);
+    assert(OsdAudioDepth(0x2001, 65535) == 0);
     std::cout << "audio selection regression checks passed\n";
 }

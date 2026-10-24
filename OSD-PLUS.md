@@ -64,7 +64,10 @@ Audio rows show the active connected audio path: compressed decoder input,
 decoder output, and audio renderer input. Each reports the negotiated codec,
 sample rate, channels, valid PCM bit depth and bitrate where exposed. Compressed
 live bitrate comes from the splitter; PCM bitrate is transport throughput. Lossy
-codecs have no PCM source bit depth and show depth N/A. Renderer input does not
+codecs without a meaningful source-depth declaration show depth N/A. DTS source
+precision is displayed when the splitter declares it; no fixed 24-bit value is
+assumed. E-AC-3 is identified by its full Windows media subtype even when the
+wave format tag is zero. Renderer input does not
 claim to describe an unexposed WASAPI/device mix format. Audio metadata refreshes
 on the worker at one-second intervals. Ambiguous multiple connected inputs are
 not guessed. MPC-BE's StreamSwitcher IsActive interface resolves multiple
