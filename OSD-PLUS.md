@@ -1,0 +1,61 @@
+# OSD Plus (rampageX fork)
+
+## Branches and upstream updates
+
+`dlss5` stays the upstream mirror. All local features and their build workflow
+live on `osd-plus`. Do not reset the feature branch to upstream or discard its
+commits when synchronizing the fork.
+
+1. Synchronize `dlss5` with HumbleUser33/MPCVR-Plus's `dlss5` branch.
+2. Merge `dlss5` into `osd-plus` on a temporary integration branch.
+3. Review the diff and resolve any conflicts in the renderer integration hooks.
+4. Build both platforms, then verify playback, SDR/HDR OSD, seeking and file changes.
+5. Merge the tested integration branch into `osd-plus`.
+
+Changes in different parts of the same file can merge automatically. A clean Git
+merge does not prove API or runtime compatibility: always build and test.
+
+## Ownership boundary
+
+`Source/OsdPlus/` owns the overlay and sampling logic.
+`.github/workflows/osd-plus.yml` builds this fork independently of upstream's
+workflow. Upstream's public COM interfaces, settings layout, codec pipeline,
+shaders and version numbers are unchanged.
+
+The only renderer integration hooks are in `DX11VideoProcessor.{h,cpp}`:
+the overlay member and include, adapter LUID capture, shutdown, cached text,
+overlay update/draw, and sync-graph visibility. Keep these hooks small when
+merging; move new behaviour into the extension directory.
+
+## First preview
+
+- White labels; green source values, cyan pipeline values, yellow timing values,
+  and orange hardware values. HDR values follow the existing OSD brightness.
+- CPU total and player process utilization, GPU busiest-engine utilization,
+  video decode utilization and **player-local** video memory use.
+- Hardware counters are selected by the rendering adapter LUID, not GPU index 0.
+- Encoded input FourCC and average/current **video stream** bitrate are read
+  from the decoder input / splitter `IBitRateInfo` interface where available.
+  Average bitrate falls back to the stream's declared `dwBitRate`. It is not a
+  whole-file bitrate or an estimate based on uncompressed renderer samples.
+- Missing interfaces/counters show `N/A`; no extra media scan or external tools.
+- Monitoring starts only after the OSD has been displayed for three seconds.
+  Driver/CPU samples update once per second on a worker; expensive GPU queries
+  suspend when the OSD is hidden. Rendering reads a cache with a nonblocking lock.
+- The sync graph is hidden; sync and dropped-frame text remains.
+- Font customization is deferred. No font enumeration, whole Unicode atlas,
+  or new startup font load is added in this preview.
+
+## Acceptance on Windows / RTX 4080
+
+Compare the original and preview with the same player settings and files:
+
+- Launch and load videos with OSD both disabled and enabled by default.
+- Toggle OSD; hardware data should appear after about four seconds.
+- Check label/value colors, SDR/HDR brightness and clipping at different sizes.
+- Compare GPU counters with Task Manager on the actual rendering GPU. CPU uses
+  elapsed CPU time, which can differ from frequency-normalized Windows displays.
+- Check H.264/HEVC/AV1 with the player's splitter; unsupported metadata is N/A.
+- Seek, pause, resume, switch files and close repeatedly; no stale data or hang.
+- Test video decode and a GPU-heavy processing path; confirm no added dropped
+  frames. Windows CI verifies compilation, not RTX hardware or load-time impact.

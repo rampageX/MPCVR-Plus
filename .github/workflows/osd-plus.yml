@@ -1,0 +1,44 @@
+name: OSD Plus build
+
+on:
+  push:
+    branches: [osd-plus]
+  pull_request:
+    branches: [dlss5]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install shader generator dependency
+        run: python -m pip install numpy
+      - name: Build x86 and x64 filters
+        shell: cmd
+        run: call build_mpcvr.cmd NoWait VS2022
+      - name: Upload filters and installation scripts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MPCVR-Plus-OSD-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            _bin/Filter_x64/*.ax
+            _bin/Filter_x86/*.ax
+            _bin/MpcVideoRenderer*.zip
+            distrib/*.cmd
+      - name: Upload compiler logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-logs
+          path: _bin/logs/

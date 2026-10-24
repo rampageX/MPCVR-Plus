@@ -544,6 +544,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 
 CDX11VideoProcessor::~CDX11VideoProcessor()
 {
+	m_OsdPlus.Stop();
 	for (const auto& [displayName, state] : m_hdrModeSavedState) {
 		DisplayConfig_t displayConfig = {};
 		if (GetDisplayConfig(displayName.c_str(), displayConfig)) {
@@ -1550,6 +1551,7 @@ HRESULT CDX11VideoProcessor::SetDevice(ID3D11Device *pDevice, ID3D11DeviceContex
 	hr = pDXGIAdapter->GetDesc(&dxgiAdapterDesc);
 	if (SUCCEEDED(hr)) {
 		m_VendorId = dxgiAdapterDesc.VendorId;
+		m_OsdAdapterLuid = dxgiAdapterDesc.AdapterLuid;
 		m_strAdapterDescription = std::format(L"{} ({:04X}:{:04X})", dxgiAdapterDesc.Description, dxgiAdapterDesc.VendorId, dxgiAdapterDesc.DeviceId);
 		DLog(L"Graphics DXGI adapter: {}", m_strAdapterDescription);
 	}
@@ -6908,6 +6910,8 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 	str += std::format(L"\nFrame rate    : {:7.3f}{} in, {:7.3f} drawn",
 		m_pFilter->m_FrameStats.GetAverageFps(), frametype, m_pFilter->m_DrawStats.GetAverageFps());
 
+	str.append(m_OsdPlus.Text());
+
 	// -- Each step, in the order the picture goes through them.
 	Rule(std::format(L"Pipeline, in {}", DXGIFormatToString(m_InternalTexFmt)), L"GPU ms");
 	const bool bSubsampled = m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422;
@@ -7259,6 +7263,7 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		return E_ABORT;
 	}
 
+	m_OsdPlus.Update(m_OsdAdapterLuid, m_pFilter->m_pInputPin ? m_pFilter->m_pInputPin->GetConnected() : nullptr);
 	const std::wstring str = GetStatsText();
 
 	// A step's lines come and go with the step: the box is made to fit them.
@@ -7273,7 +7278,7 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 
 		m_StatsBackground.Draw(pRenderTargetView, rtSize);
 
-		hr = m_Font3D.Draw2DText(pRenderTargetView, rtSize, m_StatsTextPoint.x, m_StatsTextPoint.y, m_dwStatsTextColor, str.c_str());
+		hr = m_OsdPlus.Draw(m_Font3D, pRenderTargetView, rtSize, m_StatsTextPoint, str, m_dwStatsTextColor, m_iHdrOsdBrightness);
 		// The marker scrolls along the bottom of the box, and starts over when the box
 		// has moved under it.
 		if (--m_StatsMarkerX < m_StatsRect.left || m_StatsMarkerX > m_StatsRect.right) {
@@ -7284,7 +7289,7 @@ HRESULT CDX11VideoProcessor::DrawStats(ID3D11Texture2D* pRenderTarget)
 		m_Rect3D.Draw(pRenderTargetView, rtSize);
 
 
-		if (CheckGraphPlacement()) {
+		if (m_OsdPlus.ShowSyncGraph() && CheckGraphPlacement()) {
 			m_Underlay.Draw(pRenderTargetView, rtSize);
 
 			m_Lines.Draw();
