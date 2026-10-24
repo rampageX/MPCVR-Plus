@@ -164,7 +164,12 @@ class COsdTelemetry {
                 }
             }
             if (generation != m_generation.load()) {
+                if (pendingStream) {
+                    CComPtr<IPin> discarded;
+                    CoGetInterfaceAndReleaseStream(pendingStream, IID_PPV_ARGS(&discarded));
+                }
                 bitrate.Release(); codec = L"N/A"; declaredRate = 0;
+                continue; // A new source gets its own three-second quiet period.
             }
             if (pending) {
                 readSource(pendingStream);
@@ -240,7 +245,11 @@ public:
         try { m_worker = std::thread([this, luid, stream, generation] {
             // Monitoring is optional: a sampling failure must not terminate the player.
             try { Run(luid, stream, generation); }
-            catch (...) { }
+            catch (...) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_text = L"\nHardware      : N/A (monitor unavailable)";
+                m_textGeneration = generation;
+            }
         }); }
         catch (...) {
             DiscardStream(stream);

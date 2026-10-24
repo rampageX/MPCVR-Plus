@@ -6,6 +6,9 @@
 live on `osd-plus`. Do not reset the feature branch to upstream or discard its
 commits when synchronizing the fork.
 
+The draft PR against `dlss5` is a review of the fork's delta, not a request to
+merge the customization into the mirror. Build and use the `osd-plus` branch.
+
 1. Synchronize `dlss5` with HumbleUser33/MPCVR-Plus's `dlss5` branch.
 2. Merge `dlss5` into `osd-plus` on a temporary integration branch.
 3. Review the diff and resolve any conflicts in the renderer integration hooks.
@@ -23,11 +26,14 @@ workflow. Upstream's public COM interfaces, settings layout, codec pipeline,
 shaders and version numbers are unchanged.
 
 The only renderer integration hooks are in `DX11VideoProcessor.{h,cpp}`:
-the overlay member and include, adapter LUID capture, shutdown, cached text,
+the overlay member and include, adapter LUID capture, source invalidation, shutdown, cached text,
 overlay update/draw, and sync-graph visibility. Keep these hooks small when
 merging; move new behaviour into the extension directory.
 
 ## First preview
+
+This preview extends the D3D11 renderer used by the DLSS features. The legacy
+D3D9 renderer is unchanged.
 
 - White labels; green source values, cyan pipeline values, yellow timing values,
   and orange hardware values. HDR values follow the existing OSD brightness.

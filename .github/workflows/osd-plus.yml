@@ -3,12 +3,14 @@ name: OSD Plus build
 on:
   push:
     branches: [osd-plus]
-  pull_request:
-    branches: [dlss5]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: osd-plus-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
