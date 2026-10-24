@@ -1,6 +1,12 @@
 // Audio connection formats, read only on the telemetry worker.
 #pragma once
 #include <mmreg.h>
+#include "AudioSelection.h"
+
+// MPC-BE AudioSwitcher/StreamSwitcher.h: read-only active-input identity.
+interface __declspec(uuid("DA395FA3-4A3E-4D85-805E-0BEFF53D4BCD")) IOsdStreamSwitcherInput : public IUnknown {
+    STDMETHOD_(bool, IsActive)() PURE;
+};
 
 class COsdAudioInfo {
     CComPtr<IPin> m_rendererInput;
@@ -86,20 +92,30 @@ public:
             if (FAILED(filter->EnumPins(&pins))) break;
             CComPtr<IPin> pin, upstream;
             CMediaType inType;
-            unsigned inputs = 0;
+            std::vector<CComPtr<IPin>> upstreamPins;
+            std::vector<CMediaType> inputTypes;
+            std::vector<int> states;
             while (pins->Next(1, &pin, nullptr) == S_OK) {
                 PIN_DIRECTION direction;
                 CMediaType candidate;
                 if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == PINDIR_INPUT
                     && SUCCEEDED(pin->ConnectionMediaType(&candidate)) && candidate.majortype == MEDIATYPE_Audio) {
-                    ++inputs;
-                    inType = candidate;
-                    pin->ConnectedTo(&upstream);
+                    CComPtr<IPin> connected;
+                    if (SUCCEEDED(pin->ConnectedTo(&connected))) {
+                        CComPtr<IOsdStreamSwitcherInput> selection;
+                        pin->QueryInterface(IID_PPV_ARGS(&selection));
+                        states.push_back(selection ? (selection->IsActive() ? 1 : 0) : -1);
+                        upstreamPins.push_back(connected);
+                        inputTypes.push_back(candidate);
+                    }
                 }
                 pin.Release();
             }
-            if (inputs > 1) break; // Never guess an active track among multiple inputs.
-            if (!inputs) { if (IsPcm(outType)) input = decoded = Format(outType); break; }
+            if (states.empty()) { if (IsPcm(outType)) input = decoded = Format(outType); break; }
+            const int active = SelectOsdAudioInput(states);
+            if (active < 0) break;
+            upstream = upstreamPins[active];
+            inType = inputTypes[active];
             if (!IsPcm(inType)) {
                 DWORD rate = 0;
                 CComPtr<IOsdBitRateInfo> bitrate;

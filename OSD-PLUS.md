@@ -67,7 +67,9 @@ live bitrate comes from the splitter; PCM bitrate is transport throughput. Lossy
 codecs have no PCM source bit depth and show depth N/A. Renderer input does not
 claim to describe an unexposed WASAPI/device mix format. Audio metadata refreshes
 on the worker at one-second intervals. Ambiguous multiple connected inputs are
-not guessed. File names are deliberately not displayed.
+not guessed. MPC-BE's StreamSwitcher IsActive interface resolves multiple
+connected inputs, and is queried again on every audio refresh so track changes
+follow the selected path. File names are deliberately not displayed.
 
 Compare the original and preview with the same player settings and files:
 
