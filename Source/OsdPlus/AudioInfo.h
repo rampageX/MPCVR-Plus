@@ -24,8 +24,10 @@ class COsdAudioInfo {
         // Windows SDK wmcodecdsp.h subtypes. Some splitters use wFormatTag=0
         // for these codecs, so the complete media subtype must take precedence.
         static constexpr GUID ddplus = {0xa7fb87af,0x2d02,0x42fb,{0xa4,0xd4,0x05,0xcd,0x93,0x84,0x3b,0xdd}};
+        static constexpr GUID truehd = {0xeb27cec4,0x163e,0x4ca3,{0x8b,0x74,0x8e,0x25,0xf9,0x1b,0x51,0x7e}};
         if (mt.subtype == ddplus) { codec = L"E-AC-3 (Dolby Digital Plus)"; tag = 0; }
         else if (mt.subtype == MEDIASUBTYPE_DVD_LPCM_AUDIO) { codec = L"DVD LPCM"; }
+        else if (mt.subtype == truehd) { codec = L"Dolby TrueHD"; }
         if (codec.empty()) {
         switch (tag) {
         case 1: codec = L"PCM"; break;
