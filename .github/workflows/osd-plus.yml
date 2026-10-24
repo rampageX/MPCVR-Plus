@@ -3,6 +3,11 @@ name: OSD Plus build
 on:
   push:
     branches: [osd-plus]
+    paths-ignore:
+      - OSD-RELEASE.json
+      - OSD-RELEASE.md
+      - tools/osd-plus/publish.ps1
+      - .github/workflows/osd-plus-release.yml
   workflow_dispatch:
 
 permissions:

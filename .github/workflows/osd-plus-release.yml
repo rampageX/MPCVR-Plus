@@ -1,0 +1,47 @@
+name: Publish accepted OSD release
+
+on:
+  push:
+    branches: [osd-plus]
+    paths: [OSD-RELEASE.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: osd-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the accepted build
+        id: accepted
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = Get-Content OSD-RELEASE.json -Raw | ConvertFrom-Json
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$($release.build_run)" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect build run' }
+          if ($run.head_sha -ne $release.source_commit -or $run.conclusion -ne 'success' -or $run.head_branch -ne 'osd-plus') { throw 'Build is not the accepted successful feature-branch commit' }
+          if ($release.tag -notmatch '^osd-v[0-9]+\.[0-9]+\.[0-9]+$' -or $release.asset_name -notmatch '^MPCVR-Plus-OSD-v[0-9]+\.[0-9]+\.[0-9]+\.zip$') { throw 'Invalid release identifier' }
+          if ($release.artifact_name -ne "MPCVR-Plus-OSD-$($release.source_commit)") { throw 'Artifact name does not match source commit' }
+          "artifact=$($release.artifact_name)" >> $env:GITHUB_OUTPUT
+          "run=$($release.build_run)" >> $env:GITHUB_OUTPUT
+      - name: Download accepted binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.accepted.outputs.artifact }}
+          run-id: ${{ steps.accepted.outputs.run }}
+          github-token: ${{ github.token }}
+          path: accepted
+      - name: Verify, package and publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tools/osd-plus/publish.ps1
