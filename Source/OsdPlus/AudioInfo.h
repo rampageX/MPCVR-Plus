@@ -42,6 +42,36 @@ class COsdAudioInfo {
         default: codec = std::format(L"Audio 0x{:X}", tag); break;
         }
         }
+        // FLAC STREAMINFO may carry source precision omitted from WAVEFORMATEX.
+        // Read only bounded codec-private data already supplied by the graph.
+        if (tag == 0xf1ac && bits == 0 && w->cbSize <= mt.cbFormat - sizeof(WAVEFORMATEX)) {
+            const BYTE* p = mt.pbFormat + sizeof(WAVEFORMATEX);
+            UINT n = w->cbSize;
+            bool marked = false;
+            if (n >= 4 && p[0] == 'f' && p[1] == 'L' && p[2] == 'a' && p[3] == 'C') {
+                p += 4;
+                n -= 4;
+                marked = true;
+            }
+            // Accept a STREAMINFO metadata header or an exact raw payload.
+            if (n >= 38 && (p[0] & 0x7f) == 0 && p[1] == 0 && p[2] == 0 && p[3] == 34) {
+                p += 4;
+                n = 34;
+            } else if (marked || n != 34) {
+                n = 0;
+            }
+            if (n == 34) {
+                const UINT minBlock = (UINT(p[0]) << 8) | p[1];
+                const UINT maxBlock = (UINT(p[2]) << 8) | p[3];
+                const UINT sampleRate = (UINT(p[10]) << 12) | (UINT(p[11]) << 4) | (p[12] >> 4);
+                const UINT channels = ((p[12] >> 1) & 7) + 1;
+                const UINT sourceBits = (((UINT(p[12]) & 1) << 4) | (p[13] >> 4)) + 1;
+                if (minBlock >= 16 && maxBlock >= minBlock && sourceBits >= 4 && sourceBits <= 32
+                    && sampleRate != 0 && sampleRate == w->nSamplesPerSec && channels == w->nChannels) {
+                    bits = sourceBits;
+                }
+            }
+        }
         bits = OsdAudioDepth(tag, bits);
         const double rate = current ? current / 1000.0 : w->nAvgBytesPerSec * 8.0 / 1000.0;
         return std::format(L"{}, {} Hz, {} ch, {}, {}", codec, w->nSamplesPerSec, w->nChannels,
