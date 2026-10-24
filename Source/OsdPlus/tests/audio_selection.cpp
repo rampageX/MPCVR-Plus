@@ -19,8 +19,8 @@ int main() {
     assert(SelectOsdAudioInput({-1, 1, -1}) == 1);
     assert(OsdAudioDepth(0x2001, 24) == 24); // DTS declaration is not discarded.
     assert(OsdAudioDepth(0x2001, 0) == 0);   // Do not invent a missing DTS depth.
-    assert(OsdAudioDepth(0xff, 16) == 0);    // AAC placeholder is not source precision.
-    assert(OsdAudioDepth(0, 16) == 0);       // E-AC-3 without defined source depth.
+    assert(OsdAudioDepth(0xff, 16) == 16); // Preserve reported AAC depth.
+    assert(OsdAudioDepth(0, 16) == 16);    // Preserve reported depth without a format tag.
     assert(OsdAudioDepth(1, 24) == 24);
     assert(OsdAudioDepth(3, 32) == 32);
     assert(OsdAudioDepth(0x2001, 65535) == 0);
