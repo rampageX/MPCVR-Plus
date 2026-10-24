@@ -25,7 +25,7 @@ class COsdTelemetry {
     std::wstring m_text;
     std::atomic<ULONGLONG> m_lastDraw = 0;
     std::atomic<unsigned> m_generation = 0;
-    IStream* m_pendingStream = nullptr;
+    CComPtr<IPin> m_pendingSource;
     LUID m_pendingLuid = {};
     unsigned m_pendingGeneration = 0;
     bool m_pending = false;
@@ -38,13 +38,6 @@ class COsdTelemetry {
         PDH_HQUERY handle = nullptr;
         ~QueryScope() { if (handle) PdhCloseQuery(handle); }
     };
-    static void DiscardStream(IStream* stream) {
-        if (!stream) return;
-        LARGE_INTEGER zero = {};
-        stream->Seek(zero, STREAM_SEEK_SET, nullptr);
-        CoReleaseMarshalData(stream);
-        stream->Release();
-    }
     static ULONGLONG Ticks(FILETIME t) { return (ULONGLONG(t.dwHighDateTime) << 32) | t.dwLowDateTime; }
 
     // Sum processes on each physical engine, then take the busiest engine.
@@ -71,24 +64,82 @@ class COsdTelemetry {
     static std::wstring Percent(double x) { return x < 0 ? L"N/A" : std::format(L"{:.1f}%", x); }
     static std::wstring Rate(DWORD x) { return x ? std::format(L"{:.2f} Mb/s", x / 1000000.0) : L"N/A"; }
 
-    void Run(LUID luid, IStream* stream, unsigned generation) {
+    void Run(LUID luid, CComPtr<IPin>& sourcePin, unsigned generation) {
         ComScope com;
         CComPtr<IOsdBitRateInfo> bitrate;
         std::wstring codec = L"N/A";
         DWORD declaredRate = 0;
-        const auto readSource = [&](IStream* source) {
+        std::wstring sourceStatus;
+        double fileAverage = 0;
+        std::wstring fileName;
+        const auto readSource = [&](IPin* source) {
             bitrate.Release(); codec = L"N/A"; declaredRate = 0;
-            CComPtr<IPin> output;
-            if (source) CoGetInterfaceAndReleaseStream(source, IID_PPV_ARGS(&output));
+            sourceStatus = source ? L"decoder input not exposed" : L"no upstream video pin";
+            fileAverage = 0; fileName.clear();
+            CComPtr<IPin> output = source;
+            // Native in-process DirectShow filters are free-threaded. Retain their
+            // pin directly, as the streaming path does, instead of requiring an
+            // IPin COM proxy/stub that a player's built-in filters may not provide.
+            if (output) {
+                PIN_INFO info = {};
+                if (SUCCEEDED(output->QueryPinInfo(&info)) && info.pFilter) {
+                    CComPtr<IBaseFilter> filter; filter.Attach(info.pFilter);
+                    FILTER_INFO filterInfo = {};
+                    if (SUCCEEDED(filter->QueryFilterInfo(&filterInfo)) && filterInfo.pGraph) {
+                        CComPtr<IFilterGraph> graph; graph.Attach(filterInfo.pGraph);
+                        CComQIPtr<IMediaSeeking> seeking = graph;
+                        REFERENCE_TIME duration = 0;
+                        GUID timeFormat = {};
+                        if (seeking && SUCCEEDED(seeking->GetTimeFormat(&timeFormat)) && timeFormat == TIME_FORMAT_MEDIA_TIME) seeking->GetDuration(&duration);
+                        CComPtr<IEnumFilters> filters;
+                        if (SUCCEEDED(graph->EnumFilters(&filters))) {
+                            CComPtr<IBaseFilter> candidate;
+                            while (filters->Next(1, &candidate, nullptr) == S_OK) {
+                                CComQIPtr<IFileSourceFilter> fileSource = candidate;
+                                if (fileSource) {
+                                    LPOLESTR path = nullptr;
+                                    if (SUCCEEDED(fileSource->GetCurFile(&path, nullptr)) && path) {
+                                        std::wstring name(path); CoTaskMemFree(path);
+                                        const auto last = name.find_last_of(L"\\/");
+                                        fileName = last == std::wstring::npos ? name : name.substr(last + 1);
+                                        // Metadata only: no media scan. File average includes audio/container.
+                                        WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+                                        const bool localDrive = name.size() > 2 && name[1] == L':'
+                                            && (GetDriveTypeW(name.substr(0, 3).c_str()) == DRIVE_FIXED
+                                                || GetDriveTypeW(name.substr(0, 3).c_str()) == DRIVE_RAMDISK);
+                                        if (duration > 0 && name.find(L"://") == std::wstring::npos
+                                                && name.rfind(L"\\\\", 0) != 0
+                                                && localDrive
+                                                && GetFileAttributesExW(name.c_str(), GetFileExInfoStandard, &attributes)) {
+                                            const auto bytes = (ULONGLONG(attributes.nFileSizeHigh) << 32) | attributes.nFileSizeLow;
+                                            fileAverage = double(bytes) * 8.0 * 10000000.0 / duration;
+                                        }
+                                        break;
+                                    }
+                                }
+                                candidate.Release();
+                            }
+                        }
+                    }
+                }
+            }
             // Skip raw-video processing filters between the decoder and renderer.
             // Traversal is bounded and happens only on this background thread.
             for (unsigned depth = 0; output && depth < 16; ++depth) {
                 PIN_INFO info = {};
-                if (FAILED(output->QueryPinInfo(&info)) || !info.pFilter) break;
+                const auto pinInfoHr = output->QueryPinInfo(&info);
+                if (FAILED(pinInfoHr) || !info.pFilter) {
+                    sourceStatus = std::format(L"pin info unavailable (0x{:08X})", static_cast<UINT>(pinInfoHr));
+                    break;
+                }
                 CComPtr<IBaseFilter> filter;
                 filter.Attach(info.pFilter);
                 CComPtr<IEnumPins> pins;
-                if (FAILED(filter->EnumPins(&pins))) break;
+                const auto enumHr = filter->EnumPins(&pins);
+                if (FAILED(enumHr)) {
+                    sourceStatus = std::format(L"decoder pins unavailable (0x{:08X})", static_cast<UINT>(enumHr));
+                    break;
+                }
                 CComPtr<IPin> pin, next;
                 bool encoded = false;
                 while (pins->Next(1, &pin, nullptr) == S_OK) {
@@ -120,7 +171,8 @@ class COsdTelemetry {
                             } else if (mt.formattype == FORMAT_MPEG2Video && mt.cbFormat >= sizeof(MPEG2VIDEOINFO)) {
                                 declaredRate = reinterpret_cast<MPEG2VIDEOINFO*>(mt.pbFormat)->hdr.dwBitRate;
                             }
-                            next->QueryInterface(IID_PPV_ARGS(&bitrate));
+                            const auto rateHr = next->QueryInterface(IID_PPV_ARGS(&bitrate));
+                            sourceStatus = bitrate ? L"" : std::format(L"splitter live bitrate unavailable (0x{:08X})", static_cast<UINT>(rateHr));
                         }
                         break;
                     }
@@ -130,7 +182,8 @@ class COsdTelemetry {
                 output = next;
             }
         };
-        readSource(stream);
+        readSource(sourcePin);
+        sourcePin.Release();
         CComPtr<IDXGIFactory4> factory;
         CComPtr<IDXGIAdapter3> adapter;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
@@ -151,27 +204,24 @@ class COsdTelemetry {
                 std::unique_lock<std::mutex> lock(m_mutex);
                 if (m_wake.wait_for(lock, std::chrono::seconds(1), [&] { return m_stop; })) break;
             }
-            IStream* pendingStream = nullptr;
+            CComPtr<IPin> pendingSource;
             LUID pendingLuid = {};
             bool pending = false;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (m_pending) {
-                    pendingStream = m_pendingStream; m_pendingStream = nullptr;
+                    pendingSource.Attach(m_pendingSource.Detach());
                     pendingLuid = m_pendingLuid; generation = m_pendingGeneration;
                     pending = true; m_pending = false;
                 }
             }
             if (generation != m_generation.load()) {
-                if (pendingStream) {
-                    CComPtr<IPin> discarded;
-                    CoGetInterfaceAndReleaseStream(pendingStream, IID_PPV_ARGS(&discarded));
-                }
                 bitrate.Release(); codec = L"N/A"; declaredRate = 0;
                 continue; // A new source gets its own three-second quiet period.
             }
             if (pending) {
-                readSource(pendingStream);
+                readSource(pendingSource);
+                pendingSource.Release();
                 if (pendingLuid.HighPart != luid.HighPart || pendingLuid.LowPart != luid.LowPart) {
                     luid = pendingLuid;
                     key = std::format(L"luid_0x{:08x}_0x{:08x}", static_cast<UINT>(luid.HighPart), luid.LowPart);
@@ -209,6 +259,21 @@ class COsdTelemetry {
             std::wstring text = std::format(L"\nCodec         : {}\nVideo bitrate : avg {}, current {}\n-- Hardware --------------------------------------------------------------------\nCPU           : {} total, {} player\nGPU           : {} busiest engine, decode {}\nVRAM (player) : {}",
                 codec, Rate(average), Rate(current), Percent(cpu), Percent(process), Percent(usage), Percent(decode),
                 hasMemory ? std::format(L"{:.0f} MiB", memory.CurrentUsage / 1048576.0) : L"N/A");
+            if (!fileName.empty() || fileAverage > 0 || !sourceStatus.empty()) {
+                std::wstring sourceText;
+                if (!fileName.empty()) {
+                    // The current atlas is ASCII-only; omit unsupported glyphs, do
+                    // not expand it or load a new font during playback.
+                    std::wstring visible;
+                    for (const auto c : fileName) visible += (c >= 32 && c < 127) ? c : L'?';
+                    if (visible.size() > 60) visible = visible.substr(0, 57) + L"...";
+                    sourceText += L"\nFile          : " + visible;
+                }
+                if (fileAverage > 0) sourceText += std::format(L"\nFile avg      : {:.2f} Mb/s (all streams + container)", fileAverage / 1000000.0);
+                if (!sourceStatus.empty()) sourceText += L"\nSource info   : " + sourceStatus;
+                const auto hardware = text.find(L"\n-- Hardware");
+                text.insert(hardware, sourceText);
+            }
             std::lock_guard<std::mutex> lock(m_mutex);
             if (generation == m_generation.load()) {
                 m_text = std::move(text); m_textGeneration = generation;
@@ -222,28 +287,26 @@ public:
         { std::lock_guard<std::mutex> lock(m_mutex); m_stop = true; }
         m_wake.notify_all();
         if (m_worker.joinable()) m_worker.join();
-        DiscardStream(m_pendingStream); m_pendingStream = nullptr;
+        m_pendingSource.Release();
     }
     void Invalidate() { m_generation.fetch_add(1); }
     bool Started() const { return m_worker.joinable(); }
     void Start(LUID luid, IPin* output) {
-        IStream* stream = nullptr;
-        if (output) CoMarshalInterThreadInterfaceInStream(__uuidof(IPin), output, &stream);
+        CComPtr<IPin> source = output;
         if (Started()) {
-            IStream* old = nullptr;
+            CComPtr<IPin> old;
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                old = m_pendingStream;
-                m_pendingStream = stream; m_pendingLuid = luid;
+                old.Attach(m_pendingSource.Detach());
+                m_pendingSource.Attach(source.Detach()); m_pendingLuid = luid;
                 m_pendingGeneration = m_generation.load(); m_pending = true;
             }
-            DiscardStream(old);
             return;
         }
         const unsigned generation = m_generation.load();
-        try { m_worker = std::thread([this, luid, stream, generation] {
+        try { m_worker = std::thread([this, luid, source, generation]() mutable {
             // Monitoring is optional: a sampling failure must not terminate the player.
-            try { Run(luid, stream, generation); }
+            try { Run(luid, source, generation); }
             catch (...) {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_text = L"\nHardware      : N/A (monitor unavailable)";
@@ -251,7 +314,9 @@ public:
             }
         }); }
         catch (...) {
-            DiscardStream(stream);
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_text = L"\nSource info   : monitor thread unavailable";
+            m_textGeneration = generation;
         }
     }
     std::wstring Text() {

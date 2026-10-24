@@ -44,6 +44,12 @@ D3D9 renderer is unchanged.
   from the decoder input / splitter `IBitRateInfo` interface where available.
   Average bitrate falls back to the stream's declared `dwBitRate`. It is not a
   whole-file bitrate or an estimate based on uncompressed renderer samples.
+- Native in-process DirectShow pin references are retained for the background
+  reader, without requiring IPin proxy/stub marshaling. Source failures include
+  a diagnostic reason instead of silently leaving every field unavailable.
+- `File avg`, where available, uses local file size and graph duration. It is
+  separately labelled because it includes audio and container overhead. Network
+  and removable files are not probed; no full media scan is performed.
 - Missing interfaces/counters show `N/A`; no extra media scan or external tools.
 - Monitoring starts only after the OSD has been displayed for three seconds.
   Driver/CPU samples update once per second on a worker; expensive GPU queries
