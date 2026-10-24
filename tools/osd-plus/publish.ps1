@@ -21,6 +21,7 @@ $asset = Join-Path (Resolve-Path release-package) $release.asset_name
 Copy-Item -LiteralPath $archives[0].FullName -Destination $asset
 @{
     source_commit = $release.source_commit
+    release_commit = $env:GITHUB_SHA
     build_run = $release.build_run
     build_url = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$($release.build_run)"
     tag = $release.tag
@@ -42,5 +43,5 @@ if ($existing.tagName -contains $release.tag) { throw 'Release already exists; r
 $tags = gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$($release.tag)" | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect tag refs' }
 if ($tags | Where-Object { $_.ref -eq "refs/tags/$($release.tag)" }) { throw 'Tag already exists; refusing to move it' }
-gh release create $release.tag $asset $checksum --repo $env:GITHUB_REPOSITORY --target $release.source_commit --title $release.title --notes-file OSD-RELEASE.md --latest
+gh release create $release.tag $asset $checksum --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title $release.title --notes-file OSD-RELEASE.md --latest
 if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

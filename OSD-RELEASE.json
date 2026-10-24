@@ -1,5 +1,6 @@
 {
   "tag": "osd-v1.0.0",
+  "publication_revision": 2,
   "title": "MPCVR-Plus OSD v1.0.0",
   "source_commit": "5762bee2d2b843c9776c3f924a8b23edbc917994",
   "build_run": 40047473332,

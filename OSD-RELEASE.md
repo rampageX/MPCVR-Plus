@@ -56,4 +56,5 @@ script supplied in the package.
 
 The OSD customization uses a separate release version without changing upstream's
 internal version. `dlss5` remains the upstream mirror and `osd-plus` contains the
-customization. The release tag points to the accepted source commit.
+customization. The release tag includes publication documentation and automation;
+its production sources are verified against the accepted binary source commit.

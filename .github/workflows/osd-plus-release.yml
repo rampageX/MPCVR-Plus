@@ -19,6 +19,8 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Validate the accepted build
         id: accepted
         shell: pwsh
@@ -31,6 +33,8 @@ jobs:
           if ($run.head_sha -ne $release.source_commit -or $run.conclusion -ne 'success' -or $run.head_branch -ne 'osd-plus') { throw 'Build is not the accepted successful feature-branch commit' }
           if ($release.tag -notmatch '^osd-v[0-9]+\.[0-9]+\.[0-9]+$' -or $release.asset_name -notmatch '^MPCVR-Plus-OSD-v[0-9]+\.[0-9]+\.[0-9]+\.zip$') { throw 'Invalid release identifier' }
           if ($release.artifact_name -ne "MPCVR-Plus-OSD-$($release.source_commit)") { throw 'Artifact name does not match source commit' }
+          git diff --quiet $release.source_commit $env:GITHUB_SHA -- Source Include Shaders external NgxShim common.props Directory.Build.props platform.props MpcVideoRenderer.sln build_mpcvr.cmd update_revision.cmd
+          if ($LASTEXITCODE -ne 0) { throw 'Production source differs from the accepted binary source' }
           "artifact=$($release.artifact_name)" >> $env:GITHUB_OUTPUT
           "run=$($release.build_run)" >> $env:GITHUB_OUTPUT
       - name: Download accepted binaries
