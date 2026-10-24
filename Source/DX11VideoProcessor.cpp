@@ -2052,6 +2052,7 @@ bool CDX11VideoProcessor::ToggleHDR(const DisplayConfig_t& displayConfig, const 
 
 BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 {
+	m_OsdPlus.InvalidateSource();
 	DLog(L"CDX11VideoProcessor::InitMediaType()");
 
 	if (!VerifyMediaType(pmt)) {

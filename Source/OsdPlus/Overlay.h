@@ -1,20 +1,33 @@
 // OSD Plus integration facade. Keep upstream renderer hooks small.
 #pragma once
+#include "../DX11Helper.h"
+#include "../D3DUtil/D3D11Font.h"
 #include "Telemetry.h"
 
 class COsdPlusOverlay {
     COsdTelemetry m_telemetry;
     ULONGLONG m_firstDraw = 0;
     std::wstring m_text;
+    bool m_sourcePending = true;
+    LUID m_luid = {};
 public:
     static constexpr bool ShowSyncGraph() { return false; }
     void Stop() { m_telemetry.Stop(); }
     const std::wstring& Text() const { return m_text; }
+    void InvalidateSource() {
+        m_firstDraw = 0; m_sourcePending = true; m_text.clear();
+        m_telemetry.Invalidate();
+    }
     void Update(LUID luid, IPin* upstream) {
+        if (luid.HighPart != m_luid.HighPart || luid.LowPart != m_luid.LowPart) {
+            m_luid = luid; InvalidateSource();
+        }
         const auto now = GetTickCount64();
         if (!m_firstDraw) m_firstDraw = now;
         // No monitoring in the player startup, renderer construction or media setup.
-        if (now - m_firstDraw >= 3000 && !m_telemetry.Started()) m_telemetry.Start(luid, upstream);
+        if (now - m_firstDraw >= 3000 && m_sourcePending) {
+            m_telemetry.Start(luid, upstream); m_sourcePending = false;
+        }
         const auto text = m_telemetry.Text();
         if (!text.empty()) m_text = text;
     }
@@ -35,7 +48,8 @@ public:
             else if (line.find(L"-- Timing") == 0) valueColor = D3DCOLOR_XRGB(255, 224, 128);
             else if (line.find(L"-- Hardware") == 0) valueColor = D3DCOLOR_XRGB(255, 192, 128);
             const auto colon = line.find(L':');
-            const size_t split = colon != std::wstring::npos && colon < 24 ? colon + 1 : line.size();
+            const size_t split = colon != std::wstring::npos && colon < 24 ? colon + 1
+                : !line.empty() && line.front() == L' ' ? 0 : line.size();
             const auto label = line.substr(0, split);
             SIZE extent = {};
             if (FAILED(hr = font.GetTextExtent(label.c_str(), &extent))) return hr;

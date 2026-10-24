@@ -1,6 +1,8 @@
 // Background-only OSD sampling. Kept outside upstream's rendering implementation.
 #pragma once
 #include <pdh.h>
+#include <pdhmsg.h>
+#include <uuids.h>
 #include <dxgi1_4.h>
 #include <thread>
 #include <mutex>
@@ -23,6 +25,27 @@ class COsdTelemetry {
     bool m_stop = false;
     std::wstring m_text;
     std::atomic<ULONGLONG> m_lastDraw = 0;
+    std::atomic<unsigned> m_generation = 0;
+    IStream* m_pendingStream = nullptr;
+    LUID m_pendingLuid = {};
+    unsigned m_pendingGeneration = 0;
+    bool m_pending = false;
+    unsigned m_textGeneration = 0;
+    struct ComScope {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        ~ComScope() { if (SUCCEEDED(result)) CoUninitialize(); }
+    };
+    struct QueryScope {
+        PDH_HQUERY handle = nullptr;
+        ~QueryScope() { if (handle) PdhCloseQuery(handle); }
+    };
+    static void DiscardStream(IStream* stream) {
+        if (!stream) return;
+        LARGE_INTEGER zero = {};
+        stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+        CoReleaseMarshalData(stream);
+        stream->Release();
+    }
     static ULONGLONG Ticks(FILETIME t) { return (ULONGLONG(t.dwHighDateTime) << 32) | t.dwLowDateTime; }
 
     // Sum processes on each physical engine, then take the busiest engine.
@@ -49,57 +72,72 @@ class COsdTelemetry {
     static std::wstring Percent(double x) { return x < 0 ? L"N/A" : std::format(L"{:.1f}%", x); }
     static std::wstring Rate(DWORD x) { return x ? std::format(L"{:.2f} Mb/s", x / 1000000.0) : L"N/A"; }
 
-    void Run(LUID luid, IStream* stream) {
-        const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        CComPtr<IPin> output;
-        if (stream) {
-            // Always consumes and releases the marshal stream, even on failure.
-            CoGetInterfaceAndReleaseStream(stream, IID_PPV_ARGS(&output));
-        }
+    void Run(LUID luid, IStream* stream, unsigned generation) {
+        ComScope com;
         CComPtr<IOsdBitRateInfo> bitrate;
         std::wstring codec = L"N/A";
         DWORD declaredRate = 0;
-        if (output) {
-            PIN_INFO info = {};
-            if (SUCCEEDED(output->QueryPinInfo(&info)) && info.pFilter) {
+        const auto readSource = [&](IStream* source) {
+            bitrate.Release(); codec = L"N/A"; declaredRate = 0;
+            CComPtr<IPin> output;
+            if (source) CoGetInterfaceAndReleaseStream(source, IID_PPV_ARGS(&output));
+            // Skip raw-video processing filters between the decoder and renderer.
+            // Traversal is bounded and happens only on this background thread.
+            for (unsigned depth = 0; output && depth < 16; ++depth) {
+                PIN_INFO info = {};
+                if (FAILED(output->QueryPinInfo(&info)) || !info.pFilter) break;
+                CComPtr<IBaseFilter> filter;
+                filter.Attach(info.pFilter);
                 CComPtr<IEnumPins> pins;
-                if (SUCCEEDED(info.pFilter->EnumPins(&pins))) {
-                    CComPtr<IPin> pin;
-                    while (pins->Next(1, &pin, nullptr) == S_OK) {
-                        PIN_DIRECTION direction;
-                        if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == PINDIR_INPUT) {
-                            CMediaType mt;
-                            if (SUCCEEDED(pin->ConnectionMediaType(&mt)) && mt.majortype == MEDIATYPE_Video) {
-                                if (mt.formattype == FORMAT_VideoInfo && mt.cbFormat >= sizeof(VIDEOINFOHEADER)) {
-                                    declaredRate = reinterpret_cast<VIDEOINFOHEADER*>(mt.pbFormat)->dwBitRate;
-                                } else if (mt.formattype == FORMAT_VideoInfo2 && mt.cbFormat >= sizeof(VIDEOINFOHEADER2)) {
-                                    declaredRate = reinterpret_cast<VIDEOINFOHEADER2*>(mt.pbFormat)->dwBitRate;
-                                }
-                                const DWORD fourcc = mt.subtype.Data1;
-                                std::wstring tag;
-                                for (unsigned j = 0; j < 4; ++j) {
-                                    const WCHAR c = (fourcc >> (8 * j)) & 255;
-                                    if (c < 32 || c > 126) { tag.clear(); break; }
-                                    tag += c;
-                                }
-                                if (!tag.empty()) codec = tag;
-                                CComPtr<IPin> compressed;
-                                if (SUCCEEDED(pin->ConnectedTo(&compressed))) compressed->QueryInterface(IID_PPV_ARGS(&bitrate));
-                                break;
-                            }
+                if (FAILED(filter->EnumPins(&pins))) break;
+                CComPtr<IPin> pin, next;
+                bool encoded = false;
+                while (pins->Next(1, &pin, nullptr) == S_OK) {
+                    PIN_DIRECTION direction;
+                    CMediaType mt;
+                    if (SUCCEEDED(pin->QueryDirection(&direction)) && direction == PINDIR_INPUT
+                            && SUCCEEDED(pin->ConnectionMediaType(&mt)) && mt.majortype == MEDIATYPE_Video
+                            && SUCCEEDED(pin->ConnectedTo(&next))) {
+                        std::wstring tag;
+                        for (unsigned j = 0; j < 4; ++j) {
+                            const WCHAR c = (mt.subtype.Data1 >> (8 * j)) & 255;
+                            if (c < 32 || c > 126) { tag.clear(); break; }
+                            tag += c;
                         }
-                        pin.Release();
+                        if (mt.subtype == MEDIASUBTYPE_MPEG2_VIDEO) tag = L"MPEG-2";
+                        else if (mt.subtype == MEDIASUBTYPE_MPEG1Payload || mt.subtype == MEDIASUBTYPE_MPEG1Video) tag = L"MPEG-1";
+                        static constexpr const wchar_t* raw[] = {
+                            L"NV12", L"YV12", L"I420", L"IYUV", L"YUY2", L"UYVY", L"YVYU",
+                            L"P010", L"P016", L"P210", L"P216", L"Y210", L"Y216", L"Y410", L"Y416",
+                            L"AYUV", L"v210", L"v410", L"RGB3", L"RGB4", L"BGR3", L"BGR4"
+                        };
+                        encoded = !tag.empty() && std::none_of(std::begin(raw), std::end(raw), [&](const auto* item) { return tag == item; });
+                        if (encoded) {
+                            codec = tag;
+                            if (mt.formattype == FORMAT_VideoInfo && mt.cbFormat >= sizeof(VIDEOINFOHEADER)) {
+                                declaredRate = reinterpret_cast<VIDEOINFOHEADER*>(mt.pbFormat)->dwBitRate;
+                            } else if (mt.formattype == FORMAT_VideoInfo2 && mt.cbFormat >= sizeof(VIDEOINFOHEADER2)) {
+                                declaredRate = reinterpret_cast<VIDEOINFOHEADER2*>(mt.pbFormat)->dwBitRate;
+                            } else if (mt.formattype == FORMAT_MPEG2Video && mt.cbFormat >= sizeof(MPEG2VIDEOINFO)) {
+                                declaredRate = reinterpret_cast<MPEG2VIDEOINFO*>(mt.pbFormat)->hdr.dwBitRate;
+                            }
+                            next->QueryInterface(IID_PPV_ARGS(&bitrate));
+                        }
+                        break;
                     }
+                    pin.Release();
                 }
-                info.pFilter->Release();
+                if (encoded) break;
+                output = next;
             }
-        }
-        output.Release();
+        };
+        readSource(stream);
         CComPtr<IDXGIFactory4> factory;
         CComPtr<IDXGIAdapter3> adapter;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
-        const std::wstring key = std::format(L"luid_0x{:08x}_0x{:08x}", static_cast<UINT>(luid.HighPart), luid.LowPart);
-        PDH_HQUERY query = nullptr;
+        std::wstring key = std::format(L"luid_0x{:08x}_0x{:08x}", static_cast<UINT>(luid.HighPart), luid.LowPart);
+        QueryScope queryScope;
+        auto& query = queryScope.handle;
         PDH_HCOUNTER gpu = nullptr;
         if (PdhOpenQueryW(nullptr, 0, &query) == ERROR_SUCCESS) {
             PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &gpu);
@@ -113,6 +151,29 @@ class COsdTelemetry {
             {
                 std::unique_lock<std::mutex> lock(m_mutex);
                 if (m_wake.wait_for(lock, std::chrono::seconds(1), [&] { return m_stop; })) break;
+            }
+            IStream* pendingStream = nullptr;
+            LUID pendingLuid = {};
+            bool pending = false;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_pending) {
+                    pendingStream = m_pendingStream; m_pendingStream = nullptr;
+                    pendingLuid = m_pendingLuid; generation = m_pendingGeneration;
+                    pending = true; m_pending = false;
+                }
+            }
+            if (generation != m_generation.load()) {
+                bitrate.Release(); codec = L"N/A"; declaredRate = 0;
+            }
+            if (pending) {
+                readSource(pendingStream);
+                if (pendingLuid.HighPart != luid.HighPart || pendingLuid.LowPart != luid.LowPart) {
+                    luid = pendingLuid;
+                    key = std::format(L"luid_0x{:08x}_0x{:08x}", static_cast<UINT>(luid.HighPart), luid.LowPart);
+                    adapter.Release();
+                    if (factory) factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
+                }
             }
             // Hide the OSD: suspend expensive driver queries, but keep the worker
             // and its counters ready. Resume with a fresh CPU baseline below.
@@ -145,11 +206,11 @@ class COsdTelemetry {
                 codec, Rate(average), Rate(current), Percent(cpu), Percent(process), Percent(usage), Percent(decode),
                 hasMemory ? std::format(L"{:.0f} MiB", memory.CurrentUsage / 1048576.0) : L"N/A");
             std::lock_guard<std::mutex> lock(m_mutex);
-            m_text = std::move(text);
+            if (generation == m_generation.load()) {
+                m_text = std::move(text); m_textGeneration = generation;
+            }
         }
-        if (query) PdhCloseQuery(query);
         bitrate.Release(); adapter.Release(); factory.Release();
-        if (SUCCEEDED(co)) CoUninitialize();
     }
 public:
     ~COsdTelemetry() { Stop(); }
@@ -157,20 +218,37 @@ public:
         { std::lock_guard<std::mutex> lock(m_mutex); m_stop = true; }
         m_wake.notify_all();
         if (m_worker.joinable()) m_worker.join();
+        DiscardStream(m_pendingStream); m_pendingStream = nullptr;
     }
+    void Invalidate() { m_generation.fetch_add(1); }
     bool Started() const { return m_worker.joinable(); }
     void Start(LUID luid, IPin* output) {
-        if (Started()) return;
         IStream* stream = nullptr;
         if (output) CoMarshalInterThreadInterfaceInStream(__uuidof(IPin), output, &stream);
-        try { m_worker = std::thread([this, luid, stream] { Run(luid, stream); }); }
+        if (Started()) {
+            IStream* old = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                old = m_pendingStream;
+                m_pendingStream = stream; m_pendingLuid = luid;
+                m_pendingGeneration = m_generation.load(); m_pending = true;
+            }
+            DiscardStream(old);
+            return;
+        }
+        const unsigned generation = m_generation.load();
+        try { m_worker = std::thread([this, luid, stream, generation] {
+            // Monitoring is optional: a sampling failure must not terminate the player.
+            try { Run(luid, stream, generation); }
+            catch (...) { }
+        }); }
         catch (...) {
-            if (stream) { LARGE_INTEGER zero = {}; stream->Seek(zero, STREAM_SEEK_SET, nullptr); CoReleaseMarshalData(stream); stream->Release(); }
+            DiscardStream(stream);
         }
     }
     std::wstring Text() {
         m_lastDraw.store(GetTickCount64(), std::memory_order_relaxed);
         std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
-        return lock.owns_lock() ? m_text : std::wstring();
+        return lock.owns_lock() && m_textGeneration == m_generation.load() ? m_text : std::wstring();
     }
 };
