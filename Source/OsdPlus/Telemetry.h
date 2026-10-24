@@ -87,7 +87,8 @@ class COsdTelemetry {
                     FILTER_INFO filterInfo = {};
                     if (SUCCEEDED(filter->QueryFilterInfo(&filterInfo)) && filterInfo.pGraph) {
                         CComPtr<IFilterGraph> graph; graph.Attach(filterInfo.pGraph);
-                        CComQIPtr<IMediaSeeking> seeking = graph;
+                        CComPtr<IMediaSeeking> seeking;
+                        graph->QueryInterface(IID_PPV_ARGS(&seeking));
                         REFERENCE_TIME duration = 0;
                         GUID timeFormat = {};
                         if (seeking && SUCCEEDED(seeking->GetTimeFormat(&timeFormat)) && timeFormat == TIME_FORMAT_MEDIA_TIME) seeking->GetDuration(&duration);
@@ -95,7 +96,8 @@ class COsdTelemetry {
                         if (SUCCEEDED(graph->EnumFilters(&filters))) {
                             CComPtr<IBaseFilter> candidate;
                             while (filters->Next(1, &candidate, nullptr) == S_OK) {
-                                CComQIPtr<IFileSourceFilter> fileSource = candidate;
+                                CComPtr<IFileSourceFilter> fileSource;
+                                candidate->QueryInterface(IID_PPV_ARGS(&fileSource));
                                 if (fileSource) {
                                     LPOLESTR path = nullptr;
                                     if (SUCCEEDED(fileSource->GetCurFile(&path, nullptr)) && path) {
