@@ -2,7 +2,6 @@
 #pragma once
 #include <pdh.h>
 #include <pdhmsg.h>
-#include <uuids.h>
 #include <dxgi1_4.h>
 #include <thread>
 #include <mutex>
