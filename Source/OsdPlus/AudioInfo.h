@@ -25,6 +25,7 @@ class COsdAudioInfo {
         // for these codecs, so the complete media subtype must take precedence.
         static constexpr GUID ddplus = {0xa7fb87af,0x2d02,0x42fb,{0xa4,0xd4,0x05,0xcd,0x93,0x84,0x3b,0xdd}};
         if (mt.subtype == ddplus) { codec = L"E-AC-3 (Dolby Digital Plus)"; tag = 0; }
+        else if (mt.subtype == MEDIASUBTYPE_DVD_LPCM_AUDIO) { codec = L"DVD LPCM"; }
         if (codec.empty()) {
         switch (tag) {
         case 1: codec = L"PCM"; break;
