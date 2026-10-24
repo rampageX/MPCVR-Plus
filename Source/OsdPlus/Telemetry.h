@@ -17,6 +17,8 @@ interface __declspec(uuid("EB2CD9E6-BA08-4acb-AA0F-3D8D0DD521CA")) IOsdBitRateIn
     STDMETHOD_(DWORD, GetAverageBitRate)() PURE;
 };
 
+#include "AudioInfo.h"
+
 class COsdTelemetry {
     std::thread m_worker;
     std::mutex m_mutex;
@@ -71,11 +73,11 @@ class COsdTelemetry {
         DWORD declaredRate = 0;
         std::wstring sourceStatus;
         double fileAverage = 0;
-        std::wstring fileName;
+        COsdAudioInfo audio;
         const auto readSource = [&](IPin* source) {
             bitrate.Release(); codec = L"N/A"; declaredRate = 0;
             sourceStatus = source ? L"decoder input not exposed" : L"no upstream video pin";
-            fileAverage = 0; fileName.clear();
+            fileAverage = 0; audio.Reset();
             CComPtr<IPin> output = source;
             // Native in-process DirectShow filters are free-threaded. Retain their
             // pin directly, as the streaming path does, instead of requiring an
@@ -87,6 +89,7 @@ class COsdTelemetry {
                     FILTER_INFO filterInfo = {};
                     if (SUCCEEDED(filter->QueryFilterInfo(&filterInfo)) && filterInfo.pGraph) {
                         CComPtr<IFilterGraph> graph; graph.Attach(filterInfo.pGraph);
+                        audio.Find(graph);
                         CComPtr<IMediaSeeking> seeking;
                         graph->QueryInterface(IID_PPV_ARGS(&seeking));
                         REFERENCE_TIME duration = 0;
@@ -102,8 +105,6 @@ class COsdTelemetry {
                                     LPOLESTR path = nullptr;
                                     if (SUCCEEDED(fileSource->GetCurFile(&path, nullptr)) && path) {
                                         std::wstring name(path); CoTaskMemFree(path);
-                                        const auto last = name.find_last_of(L"\\/");
-                                        fileName = last == std::wstring::npos ? name : name.substr(last + 1);
                                         // Metadata only: no media scan. File average includes audio/container.
                                         WIN32_FILE_ATTRIBUTE_DATA attributes = {};
                                         const bool localDrive = name.size() > 2 && name[1] == L':'
@@ -218,7 +219,7 @@ class COsdTelemetry {
                 }
             }
             if (generation != m_generation.load()) {
-                bitrate.Release(); codec = L"N/A"; declaredRate = 0;
+                bitrate.Release(); audio.Reset(); codec = L"N/A"; declaredRate = 0;
                 continue; // A new source gets its own three-second quiet period.
             }
             if (pending) {
@@ -261,21 +262,14 @@ class COsdTelemetry {
             std::wstring text = std::format(L"\nCodec         : {}\nVideo bitrate : avg {}, current {}\n-- Hardware --------------------------------------------------------------------\nCPU           : {} total, {} player\nGPU           : {} busiest engine, decode {}\nVRAM (player) : {}",
                 codec, Rate(average), Rate(current), Percent(cpu), Percent(process), Percent(usage), Percent(decode),
                 hasMemory ? std::format(L"{:.0f} MiB", memory.CurrentUsage / 1048576.0) : L"N/A");
-            if (!fileName.empty() || fileAverage > 0 || !sourceStatus.empty()) {
+            if (fileAverage > 0 || !sourceStatus.empty()) {
                 std::wstring sourceText;
-                if (!fileName.empty()) {
-                    // The current atlas is ASCII-only; omit unsupported glyphs, do
-                    // not expand it or load a new font during playback.
-                    std::wstring visible;
-                    for (const auto c : fileName) visible += (c >= 32 && c < 127) ? c : L'?';
-                    if (visible.size() > 60) visible = visible.substr(0, 57) + L"...";
-                    sourceText += L"\nFile          : " + visible;
-                }
                 if (fileAverage > 0) sourceText += std::format(L"\nFile avg      : {:.2f} Mb/s (all streams + container)", fileAverage / 1000000.0);
                 if (!sourceStatus.empty()) sourceText += L"\nSource info   : " + sourceStatus;
                 const auto hardware = text.find(L"\n-- Hardware");
                 text.insert(hardware, sourceText);
             }
+            text.insert(text.find(L"\n-- Hardware"), audio.Text());
             std::lock_guard<std::mutex> lock(m_mutex);
             if (generation == m_generation.load()) {
                 m_text = std::move(text); m_textGeneration = generation;

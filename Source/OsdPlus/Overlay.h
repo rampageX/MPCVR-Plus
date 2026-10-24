@@ -46,6 +46,7 @@ public:
             if (line.find(L"-- Source") == 0) valueColor = D3DCOLOR_XRGB(128, 255, 128);
             else if (line.find(L"-- Pipeline") == 0) valueColor = D3DCOLOR_XRGB(128, 224, 255);
             else if (line.find(L"-- Timing") == 0) valueColor = D3DCOLOR_XRGB(255, 224, 128);
+            else if (line.find(L"-- Audio") == 0) valueColor = D3DCOLOR_XRGB(224, 176, 255);
             else if (line.find(L"-- Hardware") == 0) valueColor = D3DCOLOR_XRGB(255, 192, 128);
             const auto colon = line.find(L':');
             const size_t split = colon != std::wstring::npos && colon < 24 ? colon + 1

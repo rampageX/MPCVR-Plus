@@ -60,6 +60,15 @@ D3D9 renderer is unchanged.
 
 ## Acceptance on Windows / RTX 4080
 
+Audio rows show the active connected audio path: compressed decoder input,
+decoder output, and audio renderer input. Each reports the negotiated codec,
+sample rate, channels, valid PCM bit depth and bitrate where exposed. Compressed
+live bitrate comes from the splitter; PCM bitrate is transport throughput. Lossy
+codecs have no PCM source bit depth and show depth N/A. Renderer input does not
+claim to describe an unexposed WASAPI/device mix format. Audio metadata refreshes
+on the worker at one-second intervals. Ambiguous multiple connected inputs are
+not guessed. File names are deliberately not displayed.
+
 Compare the original and preview with the same player settings and files:
 
 - Launch and load videos with OSD both disabled and enabled by default.
