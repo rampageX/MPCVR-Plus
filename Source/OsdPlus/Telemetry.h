@@ -9,6 +9,8 @@
 #include <chrono>
 #include <map>
 #include <atomic>
+#include <cwctype>
+#include <cmath>
 #pragma comment(lib, "pdh.lib")
 
 // MPC-HC/MPC-BE splitter output pin statistics (include/IBitRateInfo.h).
@@ -44,23 +46,39 @@ class COsdTelemetry {
 
     // Sum processes on each physical engine, then take the busiest engine.
     // Adding independent engines would incorrectly exceed Task Manager's GPU usage.
-    static double EngineUsage(PDH_HCOUNTER counter, const std::wstring& luid, bool decode) {
+    static double EngineUsage(PDH_HCOUNTER counter, const std::wstring& luid, bool decode, std::wstring& diagnostic) {
         DWORD bytes = 0, count = 0;
-        if (!counter || PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, nullptr) != PDH_MORE_DATA) return -1;
-        std::vector<BYTE> buffer(bytes);
+        if (!counter) { diagnostic = L"GPU counter unavailable"; return -1; }
+        PDH_STATUS status = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, nullptr);
+        if (status != PDH_MORE_DATA || !bytes || bytes > 16 * 1024 * 1024) {
+            diagnostic = std::format(L"GPU probe 0x{:08X}", static_cast<UINT>(status)); return -1;
+        }
+        std::vector<BYTE> buffer;
+        for (unsigned attempt = 0; attempt < 3; ++attempt) {
+            buffer.resize(bytes);
+            status = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count,
+                reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data()));
+            if (status != PDH_MORE_DATA || bytes > 16 * 1024 * 1024) break;
+        }
+        if (status != ERROR_SUCCESS) {
+            diagnostic = std::format(L"GPU array 0x{:08X}", static_cast<UINT>(status)); return -1;
+        }
         auto items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
-        if (PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bytes, &count, items) != ERROR_SUCCESS) return -1;
         std::map<std::wstring, double> engines;
         for (DWORD i = 0; i < count; ++i) {
-            const std::wstring name(items[i].szName);
-            if (name.find(luid) == std::wstring::npos || (decode && name.find(L"engtype_VideoDecode") == std::wstring::npos)) continue;
+            if (!items[i].szName) continue;
+            std::wstring name(items[i].szName);
+            std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+            if (name.find(luid + L"_") == std::wstring::npos || (decode && name.find(L"engtype_videodecode") == std::wstring::npos)) continue;
             const auto status = items[i].FmtValue.CStatus;
             if (status != PDH_CSTATUS_VALID_DATA && status != PDH_CSTATUS_NEW_DATA) continue;
+            if (!std::isfinite(items[i].FmtValue.doubleValue) || items[i].FmtValue.doubleValue < 0) continue;
             const auto engine = name.find(L"_phys_");
             if (engine != std::wstring::npos) engines[name.substr(engine)] += items[i].FmtValue.doubleValue;
         }
         double peak = -1;
         for (const auto& entry : engines) peak = std::max(peak, entry.second);
+        if (peak < 0 && !decode) diagnostic = L"GPU no valid engine for " + luid;
         return peak < 0 ? -1 : std::clamp(peak, 0.0, 100.0);
     }
     static std::wstring Percent(double x) { return x < 0 ? L"N/A" : std::format(L"{:.1f}%", x); }
@@ -194,10 +212,22 @@ class COsdTelemetry {
         QueryScope queryScope;
         auto& query = queryScope.handle;
         PDH_HCOUNTER gpu = nullptr;
-        if (PdhOpenQueryW(nullptr, 0, &query) == ERROR_SUCCESS) {
-            PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &gpu);
-            PdhCollectQueryData(query);
-        }
+        PDH_HCOUNTER utility = nullptr;
+        std::wstring gpuStatus;
+        ULONGLONG retryAt = 0;
+        const auto openCounters = [&] {
+            if (query) PdhCloseQuery(query);
+            query = nullptr; gpu = nullptr; utility = nullptr;
+            auto status = PdhOpenQueryW(nullptr, 0, &query);
+            if (status == ERROR_SUCCESS) {
+                status = PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0, &gpu);
+                PdhAddEnglishCounterW(query, L"\\Processor Information(_Total)\\% Processor Utility", 0, &utility);
+            }
+            gpuStatus = status == ERROR_SUCCESS ? L"" : std::format(L"GPU init 0x{:08X}", static_cast<UINT>(status));
+            if (query) PdhCollectQueryData(query); // Baseline only; never publish this sample.
+            retryAt = GetTickCount64() + 15000;
+        };
+        // Delay PDH setup until the OSD is actually visible.
         FILETIME idle = {}, kernel = {}, user = {}, creation, exit, pk = {}, pu = {};
         GetSystemTimes(&idle, &kernel, &user);
         GetProcessTimes(GetCurrentProcess(), &creation, &exit, &pk, &pu);
@@ -251,8 +281,26 @@ class COsdTelemetry {
                 prevIdle = Ticks(idle); prevTotal = total; prevProcess = busy;
             }
             double usage = -1, decode = -1;
-            if (query && PdhCollectQueryData(query) == ERROR_SUCCESS) {
-                usage = EngineUsage(gpu, key, false); decode = EngineUsage(gpu, key, true);
+            bool hasUtility = false;
+            const auto collect = query ? PdhCollectQueryData(query) : PDH_INVALID_HANDLE;
+            if (collect == ERROR_SUCCESS) {
+                gpuStatus.clear();
+                usage = EngineUsage(gpu, key, false, gpuStatus);
+                std::wstring decodeStatus;
+                decode = EngineUsage(gpu, key, true, decodeStatus);
+                PDH_FMT_COUNTERVALUE value = {};
+                if (utility && PdhGetFormattedCounterValue(utility, PDH_FMT_DOUBLE | PDH_FMT_NOCAP100, nullptr, &value) == ERROR_SUCCESS
+                    && (value.CStatus == PDH_CSTATUS_VALID_DATA || value.CStatus == PDH_CSTATUS_NEW_DATA)
+                    && std::isfinite(value.doubleValue) && value.doubleValue >= 0) {
+                    cpu = std::clamp(value.doubleValue, 0.0, 100.0); hasUtility = true;
+                }
+            } else {
+                gpuStatus = std::format(L"GPU collect 0x{:08X}", static_cast<UINT>(collect));
+            }
+            if (usage < 0 && GetTickCount64() >= retryAt) {
+                const auto failure = gpuStatus;
+                openCounters();
+                if (gpuStatus.empty()) gpuStatus = failure + L" (query restarted; warming up)";
             }
             DXGI_QUERY_VIDEO_MEMORY_INFO memory = {};
             const bool hasMemory = adapter && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory));
@@ -262,6 +310,8 @@ class COsdTelemetry {
             std::wstring text = std::format(L"\nCodec         : {}\nVideo bitrate : avg {}, current {}\n-- Hardware --------------------------------------------------------------------\nCPU           : {} total, {} player\nGPU           : {} busiest engine, decode {}\nVRAM (player) : {}",
                 codec, Rate(average), Rate(current), Percent(cpu), Percent(process), Percent(usage), Percent(decode),
                 hasMemory ? std::format(L"{:.0f} MiB", memory.CurrentUsage / 1048576.0) : L"N/A");
+            if (!gpuStatus.empty()) text += L"\nMonitor status: " + gpuStatus;
+            if (!hasUtility) text += L"\nCPU metric    : busy time (Utility unavailable)";
             if (fileAverage > 0 || !sourceStatus.empty()) {
                 std::wstring sourceText;
                 if (fileAverage > 0) sourceText += std::format(L"\nFile avg      : {:.2f} Mb/s (all streams + container)", fileAverage / 1000000.0);
@@ -321,3 +371,4 @@ public:
         return lock.owns_lock() && m_textGeneration == m_generation.load() ? m_text : std::wstring();
     }
 };
+
