@@ -23,7 +23,7 @@
 #include <wincodec.h>
 #include "Utils/CPUInfo.h"
 #include "Utils/gpu_memcpy_sse4.h"
-#include "../Include/Version.h"
+#include "Version.h"
 #include "Helper.h"
 
 std::wstring GetVersionStr()
@@ -216,6 +216,7 @@ static ColorFormat_t fourcc_to_cformat(const DWORD fourcc)
 
 	switch (fourcc) {
 	case FCC('NV12'): cformat = CF_NV12; break;
+	case FCC('NV16'): cformat = CF_NV16; break;
 	case FCC('P010'): cformat = CF_P010; break;
 	case FCC('P016'): cformat = CF_P016; break;
 	case FCC('YUY2'): cformat = CF_YUY2; break;
@@ -281,6 +282,7 @@ ColorFormat_t GetColorFormat(const CMediaType* pmt)
 }
 
 static DX9PlaneConfig DX9PlanesNV12   = { D3DFMT_L8,  D3DFMT_A8L8,   D3DFMT_UNKNOWN, 2, 2 };
+static DX9PlaneConfig DX9PlanesNV16   = { D3DFMT_L8,  D3DFMT_A8L8,   D3DFMT_UNKNOWN, 2, 1 };
 static DX9PlaneConfig DX9PlanesP01x   = { D3DFMT_L16, D3DFMT_G16R16, D3DFMT_UNKNOWN, 2, 2 };
 static DX9PlaneConfig DX9PlanesP21x   = { D3DFMT_L16, D3DFMT_G16R16, D3DFMT_UNKNOWN, 2, 1 };
 static DX9PlaneConfig DX9Planes420P   = { D3DFMT_L8,  D3DFMT_L8,     D3DFMT_L8,      2, 2 };
@@ -293,6 +295,7 @@ static DX9PlaneConfig DX9Planes444P16 = { D3DFMT_L16, D3DFMT_L16,    D3DFMT_L16,
 static DX9PlaneConfig DX9Plane_ARGB8 = { D3DFMT_A8R8G8B8, D3DFMT_UNKNOWN, D3DFMT_UNKNOWN, 1, 1 }; // YUY2, UYVY
 
 static DX11PlaneConfig_t DX11PlanesNV12   = { DXGI_FORMAT_R8_UNORM,  DXGI_FORMAT_R8G8_UNORM,   DXGI_FORMAT_UNKNOWN,   2, 2 };
+static DX11PlaneConfig_t DX11PlanesNV16   = { DXGI_FORMAT_R8_UNORM,  DXGI_FORMAT_R8G8_UNORM,   DXGI_FORMAT_UNKNOWN,   2, 1 };
 static DX11PlaneConfig_t DX11PlanesP01x   = { DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_UNKNOWN,   2, 2 };
 static DX11PlaneConfig_t DX11PlanesP21x   = { DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_UNORM, DXGI_FORMAT_UNKNOWN,   2, 1 };
 static DX11PlaneConfig_t DX11Planes420P   = { DXGI_FORMAT_R8_UNORM,  DXGI_FORMAT_R8_UNORM,     DXGI_FORMAT_R8_UNORM,  2, 2 };
@@ -310,6 +313,7 @@ static const FmtConvParams_t s_FmtConvMapping[] = {
 	// cformat    | str         | DXVA2Format    | D3DFormat(DX9)     |pDX9Planes| VP11Format                | DX11Format                |  pDX11Planes  |Packsize|PitchCoeff| CSType|Subsampling|CDepth
 	{CF_NONE,      L"unknown",   D3DFMT_UNKNOWN,  D3DFMT_UNKNOWN,         nullptr, DXGI_FORMAT_UNKNOWN,        DXGI_FORMAT_UNKNOWN,               nullptr,       0, 0,        CS_YUV,    0,        0 },
 	{CF_NV12,      L"NV12",      D3DFMT_NV12,     D3DFMT_NV12,     &DX9PlanesNV12, DXGI_FORMAT_NV12,           DXGI_FORMAT_NV12,          &DX11PlanesNV12,       1, 3,        CS_YUV,  420,        8 },
+	{CF_NV16,      L"NV16",      D3DFMT_UNKNOWN,  D3DFMT_PLANAR,   &DX9PlanesNV16, DXGI_FORMAT_UNKNOWN,        DXGI_FORMAT_PLANAR,        &DX11PlanesNV16,       1, 4,        CS_YUV,  422,        8 },
 	{CF_P010,      L"P010",      D3DFMT_P010,     D3DFMT_P010,     &DX9PlanesP01x, DXGI_FORMAT_P010,           DXGI_FORMAT_P010,          &DX11PlanesP01x,       2, 3,        CS_YUV,  420,       16 },
 	{CF_P016,      L"P016",      D3DFMT_P016,     D3DFMT_P016,     &DX9PlanesP01x, DXGI_FORMAT_P016,           DXGI_FORMAT_P016,          &DX11PlanesP01x,       2, 3,        CS_YUV,  420,       16 },
 	{CF_YUY2,      L"YUY2",      D3DFMT_YUY2,     D3DFMT_YUY2,    &DX9Plane_ARGB8, DXGI_FORMAT_YUY2,           DXGI_FORMAT_YUY2,         &DX11Plane_RGBA8,       2, 2,        CS_YUV,  422,        8 },
@@ -816,7 +820,12 @@ void ConvertR10G10B10A2toBGR32(const UINT lines, BYTE* dst, UINT dst_pitch, cons
 	// R - 0x00ff0000
 	// X - 0xff000000
 
-	UINT line_pixels = abs(src_pitch) / 4;
+	// As many pixels as the destination's row holds: the source's pitch is a mapped
+	// texture's, rounded up to an alignment (128 bytes on an RTX 4060), and a picture whose
+	// width is not a multiple of it wrote that many pixels past each row of the DIB, the
+	// last row past the end of GetDisplayedImage's allocation: the heap was found corrupt
+	// (0xC0000374) with a 10-bit swap chain 720 and 656 pixels wide.
+	const UINT line_pixels = std::min<UINT>(abs(src_pitch) / 4, dst_pitch / 4);
 
 	for (UINT y = 0; y < lines; ++y) {
 		uint32_t* src32 = (uint32_t*)src;
@@ -840,7 +849,8 @@ void ConvertR10G10B10A2toBGR48(const UINT lines, BYTE* dst, UINT dst_pitch, cons
 	// G - 0x000ffc00
 	// B - 0x3ff00000
 	// A - 0xc0000000
-	UINT line_pixels = abs(src_pitch) / 4;
+	// Six bytes a pixel, the row rounded up to four: dst_pitch / 6 is the width. See above.
+	const UINT line_pixels = std::min<UINT>(abs(src_pitch) / 4, dst_pitch / 6);
 
 	for (UINT y = 0; y < lines; ++y) {
 		uint32_t* src32 = (uint32_t*)src;
@@ -863,7 +873,7 @@ void ConvertR10G10B10A2toBGR64(const UINT lines, BYTE* dst, UINT dst_pitch, cons
 	// G - 0x000ffc00
 	// B - 0x3ff00000
 	// A - 0xc0000000
-	UINT line_pixels = abs(src_pitch) / 4;
+	const UINT line_pixels = std::min<UINT>(abs(src_pitch) / 4, dst_pitch / 8);  // see BGR32
 
 	for (UINT y = 0; y < lines; ++y) {
 		uint32_t* src32 = (uint32_t*)src;

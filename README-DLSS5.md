@@ -15,7 +15,7 @@ rendering is bit-identical to upstream.
 | **Settings** | one page, seven tabs, in the order the picture travels through them |
 
 It was called MPCVR-DLSS5 until 1.7, when DLSS 5 stopped being the whole of it. The branch is
-still `dlss5`, so the filter reports itself as `0.10.8.xxxx.dlss5`.
+still `dlss5`, so the filter reports itself as `0.10.9.xxxx.dlss5`.
 
 ## The two DLSS passes
 
@@ -114,8 +114,13 @@ The D3D12 path, on the same device in the same process, works.
 
 So `CDlssNR` builds a **private D3D12 device** on the same adapter (matched by LUID). The
 renderer keeps allocating its textures on D3D11; they carry an NT share handle and are
-opened a second time on the D3D12 side. Synchronisation is CPU-side in both directions —
-see `Source/DLSS/DlssNR.h` for why that is deliberate.
+opened a second time on the D3D12 side. The two devices wait for each other on the GPU,
+through two shared fences, and the render thread waits for neither. It used to wait for
+both on the CPU, 18 ms a picture at 1080p on the RTX 4060, which held DLSS 5 NR with DLSS SR
+from 1080p to 4K at "ready in 26.2 ms" with 107 pictures of a 10-second run left out; with
+the waits on the GPU, 19.6 ms and none. What keeps that from the device removal an earlier
+GPU-side version caused, and from a hung queue freezing the picture, is in
+`Source/DLSS/DlssNR.h`.
 
 **The snippet refuses unknown callers.** It walks back to the calling module and rejects
 anything whose path does not contain `nvngx.dll`, returning `0xBAD00002` and logging
@@ -1151,8 +1156,12 @@ the picture, in 8-bit levels):
   upstream asks -- nothing is taken away from it here -- but *Video Super Resolution* greys
   while this pre-pass is in service, and the scaling line reads `D3D11 (No Super Resolution
   when chroma by shaders)` instead of starring work nobody did;
-- **deinterlacing** works on NV12 only on this driver, so interlaced video keeps the
-  processor's own chroma; 4:4:4 and RGB sources have no chroma to rebuild and are left alone;
+- **deinterlacing** works on NV12 only on this driver, so interlaced pictures keep the
+  processor's own chroma. A stream only *said* to be interlaced keeps the pre-pass: decoders
+  mark many streams as ones that may be interlaced and then flag each picture, LAV an XviD
+  film whose every picture is progressive among them, and the processor takes its chroma back
+  at the first picture that really is interlaced, for the rest of the film. 4:4:4 and RGB
+  sources have no chroma to rebuild and are left alone;
 - **HDR passthrough** is unaffected: the processor answers that it converts a PQ picture in
   AYUV, Y410 or Y416 to PQ RGB just as it does one in NV12 or P010 (`vp444_probe --hdrconv`).
 
@@ -1162,8 +1171,9 @@ processor, with what it costs (a 1920x800 film in a 2880x1200 window, Jinc):
     1 Chroma      : 4:2:0 -> 4:4:4 Jinc (EWA), for the processor                 2.8
     2 Processor   : D3D11 VP to R10G10B10A2_UNORM, resizes                       0.6
 
-and an interlaced film, which keeps the processor's chroma, reads `converts chroma
-(interlaced)` on the Processor step.
+and a film whose pictures come interlaced, which keeps the processor's chroma, reads
+`converts chroma (interlaced pictures)` on the Processor step; a format the pre-pass does not
+take reads `converts chroma (not replaced in this format)`.
 
 The box needs Direct3D 11 and costs the chroma pass, which the Chroma step times: a few tenths
 of a millisecond at 1080p for Catmull-Rom and the simpler kernels, more for Jinc (2.8 ms on the
@@ -1183,6 +1193,43 @@ of the size its WIDTH and HEIGHT give, reading the plane, what earlier passes sa
 tables. A compute pass writes through unordered access slot 0, the one slot feature level 11.0
 always gives a compute shader. `--tmpvport` checks that this gives the harness's pictures
 exactly, to the last half float, and that the chroma siting is applied.
+
+### RTX Video HDR on a small picture
+
+The driver accepts RTX Video HDR for any picture, and then applies it only when what the
+video processor writes has **640x360 pixels or more**. Measured with `playback_test --vpturns`
+on a 640x270 XviD film, through the processor resized to one size after another and read off
+the desktop: 672x342 (229 824 pixels) and 768x288 are left as they are, 640x360 and 960x270
+are tone mapped. It is the area that counts, not either side, and the rectangle written, not
+the texture: the picture at its own size in the corner of a 640x360 texture is left out all
+the same. A 1920x800 film gets it at its own size.
+
+So a small film the shaders enlarge used to go without it -- the processor converts it at its
+own size -- while the same film the processor enlarges got it, and two presets showed two
+different pictures: on that XviD film, highlights up to 790 nits with the processor enlarging,
+under 340 with the shaders. Where the shaders resize and RTX Video HDR is on, the processor now
+enlarges such a picture first, keeping its shape, just past 640x360 (640x270 to 740x312), and
+the shaders enlarge the rest; the Processor step says `to 740x312 for RTX Video HDR`, and the
+Scaling step starts from there (`740x312 -> 3840x1620 FSRCNNX 16 AR`). It costs
+some of the shaders' enlargement, measured on Fight Club reduced to 640x266 and enlarged back
+to 1920x800, against the original:
+
+| Enlarged by | Luma PSNR | Detail kept |
+|---|---|---|
+| FSRCNNX 16 AR alone | 37.32 dB | 0.629 |
+| the processor to 745x310, then FSRCNNX 16 AR | 35.70 dB | 0.534 |
+| the processor alone | 35.40 dB | 0.573 |
+| the processor with Super Resolution | 35.38 dB | 0.600 |
+
+Wherever the processor still writes less than 640x360 -- DLSS 5 NR or DLSS SR taking the
+picture at its own size, or a window that small -- the HDR line of the statistics adds `left
+out by the driver under 640x360`.
+
+The driver's Super Resolution has a fault of its own on an HDR desktop without RTX Video HDR:
+given an 8-bit picture to write in ten bits, it writes HDR10 -- PQ, BT.2020 -- whatever colour
+space it was asked for, and the SDR swap chain showed a dim, grey picture, everything under
+115 nits. The processor is then given eight bits to write, and writes what it was asked. A
+10-bit source was never affected.
 
 ---
 
@@ -1639,7 +1686,7 @@ presets.
 | Setting | Default | What it does |
 |---|---|---|
 | Chroma upsampling: Method | Catmull-Rom | Rebuilds the colour of 4:2:0 and 4:2:2 video at full resolution when the shaders convert the picture, or for the replacement below; greyed while the video processor converts every format. Ordered best first, as they measured (see *Upscaling* above), and each entry keeps its own number, so a setting already saved still means what it did. Jinc (EWA) is the best of them on film and stays inside the conversion shader; RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv prescaler, FSRCNNX being the one for drawn lines. Those two need Direct3D 11 and 4:2:0 in planes; Catmull-Rom stands in elsewhere |
-| Use this method instead of the video processor's chroma upsampling | off | The chroma replacement (see *Who resizes while DLSS runs*). The shaders rebuild the chroma of a progressive 4:2:0 or 4:2:2 picture with the method above and hand the video processor a 4:4:4 one, so the processor stays in the chain and RTX Video HDR goes on working. Interlaced video keeps the processor's chroma. It costs RTX Video Super Resolution, which the driver does not apply to a 4:4:4 picture: *Video Super Resolution* greys while this is ticked, and the statistics say `D3D11 (No Super Resolution when chroma by shaders)`. Needs Direct3D 11 |
+| Use this method instead of the video processor's chroma upsampling | off | The chroma replacement (see *Who resizes while DLSS runs*). The shaders rebuild the chroma of a progressive 4:2:0 or 4:2:2 picture with the method above and hand the video processor a 4:4:4 one, so the processor stays in the chain and RTX Video HDR goes on working. Interlaced pictures keep the processor's chroma; a stream only marked as one that may be interlaced keeps this until a picture really is. It costs RTX Video Super Resolution, which the driver does not apply to a 4:4:4 picture: *Video Super Resolution* greys while this is ticked, and the statistics say `D3D11 (No Super Resolution when chroma by shaders)`. Needs Direct3D 11 |
 
 ### Scaling
 
@@ -1700,7 +1747,7 @@ key, both DLL paths, and the working size, which is what the card can carry.
 | Nits | 1000 | The display's real peak, 100 to 10000, for the tone mapping methods |
 | Windows HDR | Don't change | Whether the filter may turn Windows HDR on by itself when HDR video, or RTX Video HDR, starts: in fullscreen only, or always. *On/off* turns it back off afterwards |
 | Subtitle and OSD brightness | the leftmost | How bright subtitles, the player's messages and the statistics are drawn over an HDR picture |
-| RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs |
+| RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs. The driver leaves out a picture the processor writes in fewer than 640x360 pixels, and the line then adds `left out by the driver under 640x360`; where the shaders resize, the processor first enlarges such a picture just past that, which the Processor step says (`to 740x312 for RTX Video HDR`) -- see *RTX Video HDR on a small picture* |
 | Convert to SDR | on | HDR video not output in HDR is converted to SDR, so that it does not look washed out |
 | SDR brightness | 125 nits | The target of that conversion, 25 to 400. Applies as the slider is dragged |
 
@@ -1801,7 +1848,7 @@ steps work in.
 | Chroma | The chroma replacement: the shaders rebuild 4:2:0 or 4:2:2 colour with the Chroma upsampling method and hand the processor a 4:4:4 picture, a prescaler's time included |
 | Processor | The video processor converts the picture, its chroma too unless the step above took it. When it is the one resizing it does that in the same call, the step says `resizes`, and its time is the resizing's too: the Scaling step then has none of its own. RTX Video Super Resolution and RTX Video HDR run inside it and are in its time. The processor works on an engine of its own, which the timestamps around it once missed altogether -- 0.0 ms with Super Resolution and RTX Video HDR at 4K, of 21.6 for the picture; it is now timed from its call to its output being ready, 17.4 ms of 20.8 there |
 | Convert | The shaders convert the picture instead, with the chroma method named, a chroma prescaler's time included |
-| DLSS 5 NR | The network's tuning, or why it is not running. *working* is the reduction and the composition at a working size below the picture's; *stabilizer* its Optical Flow and the stabilizer. The network is timed where the renderer waits for it, since it runs on a Direct3D 12 device of its own |
+| DLSS 5 NR | The network's tuning, or why it is not running. *working* is the reduction and the composition at a working size below the picture's; *stabilizer* its Optical Flow and the stabilizer. The network runs on a Direct3D 12 device of its own and is timed there, by timestamps on its queue |
 | Scaling | From what size to what size, and what does it, with all it costs: the processor's second turn after DLSS 5 NR, DLSS SR and its *motion*, or an mpv prescaler, each with the resize shader that finishes the job. `SuperResolution*` when the driver's Super Resolution runs, and `(No Super Resolution when chroma by shaders)` when it was asked for on a 4:4:4 picture. When the processor resized in its own step, a time here is only the resize shader copying the picture to its place -- a film with black bars, or one in a window -- and the line says `placed by the shaders`: 0.5 ms for a 2.39:1 film on a 4K screen, which is not Super Resolution's (that is in the processor's time). With *DLSS SR* ticked and not enlarging, a sub-line says why |
 | Finish | What runs at the size the picture is shown at: a correction, the tone mapping, the sharpening and its level, the player's shaders, the dither |
 
@@ -1826,7 +1873,8 @@ as they change:
   CPU and waits included, so above the total), and how many were not done at their present
   time.
 - *CPU (ms)*: the last picture on the render thread. *copy* hands the sample to the GPU,
-  *draw* issues every step and waits for DLSS 5 NR, *wait* is the wait for the moment to
+  *draw* issues every step, DLSS 5 NR's included, which it no longer waits for (it did
+  until the two devices waited for each other on the GPU), *wait* is the wait for the moment to
   present -- a refresh chosen in advance, a vertical blank, the picture's time -- and
   *Present* the call itself. The wait was once counted as Present.
 - *Swap chain* and *Frame sync*: the swap effect, its format and how many buffers it has, and
@@ -2008,15 +2056,20 @@ reached the screen; where in a refresh `Present` was called and how long it took
 Every figure in *A refresh chosen for every picture* comes from it.
 
 The same line says whether DLSS 5 NR and DLSS Super Resolution really ran on the picture,
-which motion the stabilizer had, and where DLSS 5 NR's time went: waiting for Direct3D 11 to
-finish its input, recording, waiting for the GPU. A note is written whenever what the two
-sessions say of themselves changes. `pacing_report.py trace.csv --dlss` reads only that:
+which motion the stabilizer had, and where DLSS 5 NR's time went: the render thread waiting
+for the network of the picture before, recording, and the network's own time on the GPU,
+the picture before's. A note is written whenever what the two sessions say of themselves
+changes. `pacing_report.py trace.csv --dlss` reads only that (playback_test --only 4, 1080p
+to 4K):
 
 ```
-  # dlss: NR on (ready 1920x1080 preset 0; stabilizer: Optical Flow 960x540)
-      0.0 s to     9.6 s, film at      0.0 s:   244 picture(s), NR on   239 (flow 239, detector 0, vectors 239), SR on     0, enlarged by the processor     0, not shown 5, longest wait 80 ms
-            drawing 24.9 ms (median), 90.3 at most; of which DLSS 5 NR waited 3.4 ms for its input, recorded for 1.0 and waited 14.6 for the GPU
+  # dlss: NR on (ready 1920x1080 preset 0; stabilizer: Optical Flow 960x540) SR on (ready 1920x1080 -> 3840x2160, Performance, preset M)
+      0.0 s to    18.3 s, film at      0.0 s:   428 picture(s), NR on   425 (flow 425, detector 0, vectors 425), SR on   425, enlarged by the processor     0, not shown 3, longest wait 722 ms
+            drawing 1.9 ms (median), 77.6 at most; of which DLSS 5 NR waited 0.0 ms for the picture before, recorded for 0.5, and ran 14.2 on the GPU
 ```
+
+A trace written before the two devices waited for each other on the GPU holds, in the same
+columns, the render thread's waits for the input and for the GPU.
 
 `pacing_report.py trace.csv --cuts` lists the pictures DLSS SR's cut detection called a cut, at
 their time in the stream (from the last seek), and the ten that came closest without being
@@ -2087,6 +2140,7 @@ playback_test.exe [--seconds 20] [--size 800x450] [--window 1280x720] [--fps 23.
 playback_test.exe --scalers       each Upscaling and Chroma upsampling method (--vp: hardware)
 playback_test.exe --greying       what the page greys, for every state the renderer can be in and each DLSS box
 playback_test.exe --afternr --file <mkv> --seek 1740   who enlarges after DLSS 5 NR, on one still of a real film
+playback_test.exe --vpturns --file <film> --rtxhdr 1 --hdrout 1   the shaders, the processor, the processor with Super Resolution: one still each, read off the desktop unclipped (vpturns_N.pfm)
 playback_test.exe --hz 30 --fps 30 --jolt   a film at the screen's own rate, and the queue it builds
 playback_test.exe --presets     two presets saved, each recalled by its key while it plays
 playback_test.exe --rewindow    the video window made again from another thread, and whose it is

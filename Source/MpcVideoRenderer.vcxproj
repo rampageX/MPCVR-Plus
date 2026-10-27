@@ -55,7 +55,7 @@
       <Command>..\update_revision.cmd</Command>
     </PreBuildEvent>
     <ClCompile>
-      <AdditionalIncludeDirectories>$(ProjectDir)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)Include;$(ProjectDir)</AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
     </ClCompile>
@@ -79,6 +79,10 @@
     <ClCompile Include="DLSS\DlssTiming.cpp" />
     <ClCompile Include="Upscale\MpvShader.cpp" />
     <ClCompile Include="DX11VideoProcessor.cpp" />
+    <ClCompile Include="DX11VideoProcessorDlss.cpp" />
+    <ClCompile Include="DX11VideoProcessorMpv.cpp" />
+    <ClCompile Include="DX11VideoProcessorPresent.cpp" />
+    <ClCompile Include="DX11VideoProcessorStats.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
     <ClCompile Include="DXVA2VP.cpp" />
@@ -120,6 +124,7 @@
     <ClInclude Include="DLSS\DlssOpticalFlow.h" />
     <ClInclude Include="DLSS\DlssStabilizer.h" />
     <ClInclude Include="DLSS\DlssCompose.h" />
+    <ClInclude Include="DLSS\DlssPass.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowCommon.h" />
     <ClInclude Include="DLSS\NvOF\nvOpticalFlowD3D11.h" />
     <ClInclude Include="DLSS\DlssSR.h" />
@@ -129,6 +134,7 @@
     <ClInclude Include="Upscale\MpvShaderTables.h" />
     <ClInclude Include="DLSS\NGXTypes.h" />
     <ClInclude Include="DX11VideoProcessor.h" />
+    <ClInclude Include="DX11VideoProcessorShared.h" />
     <ClInclude Include="DX9Helper.h" />
     <ClInclude Include="DX9VideoProcessor.h" />
     <ClInclude Include="DXVA2VP.h" />

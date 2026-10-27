@@ -215,6 +215,13 @@ private:
 	int m_iSharpenLevel = SHARPEN_LEVEL_DEF;
 	CComPtr<ID3D11PixelShader> m_pPSSharpen;
 	CComPtr<ID3D11Buffer> m_pSharpenConstants;
+	// The same method ending on the dither, for when sharpening is the last step
+	// before it: one pass to the screen where there were two.
+	CComPtr<ID3D11PixelShader> m_pPSSharpenDither;
+	bool SharpenTakesDither() const {
+		return m_bFinalPass && m_pPSSharpen && m_pPSSharpenDither && m_pPostScaleShaders.empty() && !m_pPSHalfOUtoInterlace;
+	}
+	void UpdateSharpenDitherShader();
 
 	bool m_bVPReplaceChroma = false;    // the setting
 	bool m_bChromaReplacedVP = false;   // and the shaders rebuild this source's chroma
@@ -292,7 +299,8 @@ private:
 	uint64_t m_presentWaitTicks = 0;    // of m_RenderStats.presentticks, the wait before Present was called
 	// Time of each step a picture goes through, for the statistics.
 	CGpuStageTimes m_DlssStageTimes;
-	CRollingMs m_DlssNRTimes;
+	CRollingMs m_DlssNRTimes;           // DLSS 5 NR's GPU time, from its own queue
+	unsigned m_uDlssNRTimed = 0;        // the last of its timings taken into it
 	// One texel of the video processor's output, copied so that the timestamp after it
 	// waits for the processor's own engine (WaitForVPForTiming).
 	CComPtr<ID3D11Texture2D> m_pVPTimingProbe;
@@ -355,7 +363,22 @@ private:
 	// takes the resizing from both.
 	bool VPResizesFirst() const { return m_bVPScaling && !m_bDlssSRActive && !(m_bDlssNRActive && !m_bDlssNRAfterUpscale); }
 	bool VPResizesAfterNR() const { return m_bVPScaling && !m_bDlssSRActive && m_bDlssNRActive && !m_bDlssNRAfterUpscale; }
+	bool VPSuperResAllowed(const int depth) const;
 	void UpdateVPSuperRes(const int depth);
+	bool VPSuperResOutputsEightBits(const int depth);   // not const: SourceIsHDR is not
+	bool m_bVPOutEightBitsAsked = false;   // the first turn was made to write eight bits for it
+
+	// RTX Video HDR is applied by the driver only when what the processor writes has
+	// 640x360 pixels or more: measured on a 640x270 XviD through the processor resized to
+	// one size after another, 672x342 (229 824 pixels) and 768x288 untouched, 640x360 and
+	// 960x270 tone mapped -- the area decides, not either side, and a 1920x800 picture gets
+	// it at its own size. The texture written counts for nothing: the picture at its own
+	// size in the corner of a 640x360 one was left out all the same.
+	static constexpr UINT64 kRtxHdrMinPixels = 640 * 360;
+	// Where the shaders resize, the first turn enlarges a smaller picture just past that,
+	// and the shaders enlarge the rest (VPConvertTexSize).
+	CSize VPConvertTexSize() const;
+	bool m_bVPPreEnlarged = false;   // the first turn writes the picture larger than the source, for RTX Video HDR
 
 	// The processor's second turn.
 	CD3D11VP m_D3D11VPScale;
@@ -537,6 +560,11 @@ public:
 
 	// Whether the shaders rebuild this source's chroma before the processor takes it.
 	bool ChromaToShaders(const FmtConvParams_t& params, const bool interlaced);
+	// An interlaced picture has come in this media type. Many decoders mark a stream as
+	// one that may be interlaced (AMINTERLACE_IsInterlaced) and then flag every picture
+	// progressive -- LAV on an XviD film -- and the chroma replacement waits for the first
+	// picture really interlaced before it gives way (CopySample).
+	bool m_bInterlacedSeen = false;
 	HRESULT UpdateConvertTo444Shader();
 	const wchar_t* ChromaScalingName() const;
 	void ConvertTo444Pass(ID3D11UnorderedAccessView* pUav);

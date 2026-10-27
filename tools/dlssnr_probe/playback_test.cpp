@@ -33,6 +33,7 @@
 //   playback_test.exe --delay N [--delayto M]   the Video delay setting, and moved while it plays;
 //                                     with MPCVR_PACING_TRACE set, pacing_report.py says where the pictures went
 //   playback_test.exe --nrscale N [--nrscaleto M]   DLSS 5 NR's working size, per cent, and moved while it plays
+//   playback_test.exe --letterbox       the picture keeps its shape in the window, with bars, instead of filling it
 //                                     which processor then converts the picture
 
 #include <windows.h>
@@ -110,6 +111,7 @@ static int g_frameSeconds = 0;         // --frame N: the page inside a real prop
 static bool g_bThemedHost = false;     // --themed: and a player that paints it
 static bool g_bDlaa = false;           // --dlaa: let DLSS SR run without enlarging
 static bool g_bAfterNR = false;        // --afternr: who enlarges what DLSS 5 NR leaves, on a real film (--file)
+static bool g_bVPTurns = false;        // --vpturns: who enlarges, without DLSS, the desktop read unclipped (--file)
 static int g_smallUpscaling = -1;      // --small N: another method under 5 %
 static int g_videoDelay = 0;           // --delay N: every picture N ms after its time (the Video delay setting)
 static int g_videoDelayTo = INT_MIN;   // --delayto N: and changed to N three seconds in, as the page's slider does
@@ -119,6 +121,10 @@ static int g_hz = 0;                   // --hz N: put the screen at N Hz for the
 static bool g_bJolt = false;           // --jolt: change a setting while it plays, and watch the queue
 static bool g_bPresetKeys = false;     // --presets: save two, recall each by its key while it plays
 static bool g_bRewindow = false;       // --rewindow: have the video window made again, from another thread and from this one
+// --letterbox: the picture keeps its shape in the window, with bars, as a player shows it,
+// where otherwise it is stretched to the window: a picture enlarged to its size is then
+// still to be put in its place.
+static bool g_bLetterbox = false;
 
 // --hz: a film at the screen's own rate is the case where a picture that once
 // arrived late never gets its refresh back, and a 60 Hz desktop never shows it.
@@ -752,6 +758,9 @@ struct Result {
 	unsigned vpUse = 0;             // VPUSE_*, as the film played
 	std::vector<BYTE> stillCrop;    // --afternr: the paused picture as the desktop showed it
 	int stillW = 0, stillH = 0;
+	std::vector<float> stillLinear; // --vpturns: the same, unclipped scRGB
+	double stillMean = 0, stillP99 = 0, stillPeak = 0, stillColour = 0, stillAbove = 0, stillDetail = 0;
+	DXGI_FORMAT stillFormat = DXGI_FORMAT_UNKNOWN;  // what the desktop frame came in
 	double stopSeconds[3] = {};
 	std::string error;
 };
@@ -1278,7 +1287,18 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 	pVW->put_Owner((OAHWND)hwnd);
 	pVW->put_WindowStyle(WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
 	pVW->SetWindowPosition(0, 0, window.cx, window.cy);
-	pBV->SetDestinationPosition(0, 0, window.cx, window.cy);
+	long destX = 0, destY = 0, destW = window.cx, destH = window.cy;
+	long videoW = 0, videoH = 0;
+	if (g_bLetterbox && SUCCEEDED(pBV->GetVideoSize(&videoW, &videoH)) && videoW > 0 && videoH > 0) {
+		if ((long long)window.cx * videoH <= (long long)window.cy * videoW) {
+			destH = (long)((long long)window.cx * videoH / videoW);
+			destY = (window.cy - destH) / 2;
+		} else {
+			destW = (long)((long long)window.cy * videoW / videoH);
+			destX = (window.cx - destW) / 2;
+		}
+	}
+	pBV->SetDestinationPosition(destX, destY, destW, destH);
 
 	CComQIPtr<IMediaControl> pMC(pGraph.p);
 	if (g_filmFile && g_filmSeek > 0) {
@@ -1529,18 +1549,28 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 			Pump(250);
 		}
 	}
-	if (g_bAfterNR && watch.Ready()) {
+	if ((g_bAfterNR || g_bVPTurns) && watch.Ready()) {
 		// The same still under every run, as the desktop shows it. The filter's own
 		// snapshot is drawn without the DLSS passes, so it would compare the runs on a
 		// picture none of them put on the screen.
 		SetForegroundWindow(hwnd);
 		BringWindowToTop(hwnd);
 		Pump(600);
+		watch.m_bKeepLinear = g_bVPTurns;
 		const CScreenWatch::Reading still = watch.Measure(hwnd);
+		watch.m_bKeepLinear = false;
 		if (still.ok) {
 			result.stillCrop = still.crop;
 			result.stillW = still.cropW;
 			result.stillH = still.cropH;
+			result.stillLinear = still.linear;
+			result.stillMean = still.mean;
+			result.stillP99 = still.p99;
+			result.stillPeak = still.peak;
+			result.stillColour = still.colour;
+			result.stillAbove = still.aboveWhite;
+			result.stillDetail = still.detail;
+			result.stillFormat = watch.Format();
 		}
 	}
 
@@ -2296,6 +2326,8 @@ int wmain(int argc, wchar_t* argv[])
 			source.cy &= ~1;
 		} else if (!wcscmp(argv[i], L"--rewindow")) {
 			g_bRewindow = true;
+		} else if (!wcscmp(argv[i], L"--letterbox")) {
+			g_bLetterbox = true;
 		} else if (!wcscmp(argv[i], L"--presets")) {
 			g_bPresetKeys = true;
 		} else if (!wcscmp(argv[i], L"--jolt")) {
@@ -2304,6 +2336,8 @@ int wmain(int argc, wchar_t* argv[])
 			g_bGreying = true;
 		} else if (!wcscmp(argv[i], L"--afternr")) {
 			g_bAfterNR = true;
+		} else if (!wcscmp(argv[i], L"--vpturns")) {
+			g_bVPTurns = true;
 		} else if (!wcscmp(argv[i], L"--dlaa")) {
 			g_bDlaa = true;
 		} else if (!wcscmp(argv[i], L"--themed")) {
@@ -2472,12 +2506,19 @@ int wmain(int argc, wchar_t* argv[])
 		{ "DLSS 5 NR, chroma replaced, the shaders enlarge",          true, false, true, UPSCALE_CatmullRom, -1, false, false, false, false, -1, 0, SUPERRES_Disable, 1 },
 		{ "DLSS 5 NR, chroma replaced, the processor enlarges",       true, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_1440p,   1 },
 	};
-	if (g_bAfterNR && !g_filmFile) {
-		printf("--afternr plays a real film: --file <film> [--seek <seconds>]\n");
+	// --vpturns: the three ways of enlarging, with whatever RTX Video HDR, HDR output and
+	// chroma replacement the command line says; the upscaler is the saved one.
+	static const Config vpTurnConfigs[] = {
+		{ "the shaders enlarge",                      false, false, true, -1, -1, false, false, false, false, -1, 0, SUPERRES_Disable, -1 },
+		{ "the processor enlarges",                   false, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_Disable, -1 },
+		{ "the processor enlarges, Super Resolution", false, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_1440p,   -1 },
+	};
+	if ((g_bAfterNR || g_bVPTurns) && !g_filmFile) {
+		printf("%s plays a real film: --file <film> [--seek <seconds>]\n", g_bAfterNR ? "--afternr" : "--vpturns");
 		return 1;
 	}
-	const Config* configs = g_bAfterNR ? afterNRConfigs : g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
-	const int configCount = (int)(g_bAfterNR ? std::size(afterNRConfigs) : g_bChroma ? std::size(chromaConfigs)
+	const Config* configs = g_bAfterNR ? afterNRConfigs : g_bVPTurns ? vpTurnConfigs : g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
+	const int configCount = (int)(g_bAfterNR ? std::size(afterNRConfigs) : g_bVPTurns ? std::size(vpTurnConfigs) : g_bChroma ? std::size(chromaConfigs)
 		: g_bScalers ? std::size(scalerConfigs) : std::size(dlssConfigs));
 
 	printf("Film %ldx%ld at %.3f fps in a %ldx%ld window, %d s per configuration after 5 s to settle.\n",
@@ -2512,6 +2553,37 @@ int wmain(int argc, wchar_t* argv[])
 		if (!r.error.empty()) {
 			printf("   FAILED: %s\n", r.error.c_str());
 			failures++;
+			continue;
+		}
+		if (g_bVPTurns) {
+			wprintf(L"   processor    : %s\n", r.vprocLine.c_str());
+			wprintf(L"   scaling      : %s\n", r.scalingLine.c_str());
+			printf("   the processor: %s\n", !(r.vpUse & (VPUSE_Converting | VPUSE_Resizing)) ? "not in the chain"
+				: (r.vpUse & VPUSE_Resizing) ? "converts and resizes" : "converts");
+			wprintf(L"   on its way out: %s\n", r.hdrLine.empty() ? L"SDR" : r.hdrLine.c_str());
+			if (r.stillCrop.empty()) {
+				printf("   FAIL: no still read off the desktop\n\n");
+				failures++;
+				continue;
+			}
+			printf("   still        : mean %.4f, p99 %.4f, peak %.3f, colour %.4f, past SDR white %.2f%%, detail %.5f, %s\n",
+				r.stillMean, r.stillP99, r.stillPeak, r.stillColour, r.stillAbove, r.stillDetail,
+				r.stillFormat == DXGI_FORMAT_R16G16B16A16_FLOAT ? "half floats" : r.stillFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? "10-bit PQ" : "8-bit");
+			if (r.stillFormat != DXGI_FORMAT_R16G16B16A16_FLOAT && r.stillFormat != DXGI_FORMAT_R10G10B10A2_UNORM) {
+				printf("   FAIL: the desktop came in 8 bits, clipped: this still says nothing of HDR\n");
+				failures++;
+			}
+			const std::wstring base = exeDir + L"\\vpturns_" + std::to_wstring(c);
+			SaveBmp(base + L".bmp", r.stillCrop, r.stillW, r.stillH);
+			// Portable float map: the unclipped scRGB, bottom row first as the format has it.
+			if (FILE* f = _wfopen((base + L".pfm").c_str(), L"wb")) {
+				fprintf(f, "PF\n%d %d\n-1.0\n", r.stillW, r.stillH);
+				for (int y = r.stillH - 1; y >= 0; y--) {
+					fwrite(r.stillLinear.data() + (size_t)y * r.stillW * 3, sizeof(float), (size_t)r.stillW * 3, f);
+				}
+				fclose(f);
+			}
+			wprintf(L"   still saved  : %s.bmp, .pfm (%dx%d)\n\n", base.c_str(), r.stillW, r.stillH);
 			continue;
 		}
 		if (g_bAfterNR) {
