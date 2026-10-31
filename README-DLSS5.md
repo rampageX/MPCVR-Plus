@@ -12,10 +12,11 @@ rendering is bit-identical to upstream.
 | **DLSS 5 NR** | NVIDIA neural reconstruction (NGX feature 18) with a temporal stabilizer made for video |
 | **DLSS SR** | DLSS Super Resolution 4.5 for enlarging, and DLAA at native size (experimental) |
 | **Presentation** | render ahead, so none of it drifts off the audio clock |
+| **Statistics** | each step and what it costs, and with rampageX's OSD Plus the codec, the audio path and the machine's load |
 | **Settings** | one page, seven tabs, in the order the picture travels through them |
 
 It was called MPCVR-DLSS5 until 1.7, when DLSS 5 stopped being the whole of it. The branch is
-still `dlss5`, so the filter reports itself as `0.10.9.xxxx.dlss5`.
+still `dlss5`, so the filter reports itself as `0.11.1.xxxx.dlss5`.
 
 ## The two DLSS passes
 
@@ -1318,7 +1319,8 @@ DLSS 5 NR and DLSS SR — and DLSS SR's GPU time comes on top, since the GPU run
 Present has returned. The delay also varied by several ms from picture to picture, enough to
 move some pictures to the next refresh of a 60 Hz screen.
 
-**Render ahead to keep audio sync** (Presentation tab, on by default) measures each picture from
+**Render ahead: a refresh chosen for each picture** (Presentation tab, on by default; *Render
+ahead to keep audio sync* before 2.5) measures each picture from
 the start of its processing to the GPU being done with it, and starts the next pictures earlier
 by the slowest of the last 32 plus 3 ms. Each picture then waits, while the GPU finishes it,
 for the moment the renderer presents at without DLSS: half a refresh before its time, on the
@@ -1331,6 +1333,10 @@ had.
 That was all it did, and only while DLSS or a luma prescaler ran. It now also chooses the
 refresh each picture is shown on, for every film: see *A refresh chosen for every picture*
 below, which is where the numbers that matter on a television are.
+
+Until 2.5 the box could not really be unticked: the renderer made for each film never read it,
+only an Apply while a film played did, and the next file had render ahead on again whatever the
+settings said.
 
 Measured in a DirectShow graph with the filter itself (`playback_test.exe`): an 800×450 film in
 a 1280×720 window on an RTX 3050 and a 60 Hz screen, with DLSS 5 NR and DLSS SR (NR 23 ms,
@@ -1398,25 +1404,14 @@ on a screen at the film's own rate (`playback_test --hz 24 --fps 24 --jolt`, and
 two runs each): queue 1 and nothing skipped, but the picture on screen **48 to 61 ms** after
 its time, the same after 20 s as at the start, with the Sync offset reading +8 to +19.
 
-So the renderer now leaves one picture out when that has lasted: when eight pictures running
-have waited more than a refresh and a margin between `Present` and the refresh they are due
-on, the next is drawn and not presented, and the one after takes the refresh before. Same
-tests: on screen **+1 to +20 ms**, steady, Sync offset -7. The statistics count it:
-
-    On screen     :  +3 ms, queue 1, caught up 1
-
-One or two at the start of a film and one after an option was changed is what the tests show.
-It is done once and judged: if the pictures that follow wait as long as before, leaving one out
-was no use -- the GPU is not finishing them in time, or the screen does not refresh as it says
--- and nothing more is left out until the next seek; the line then reads `caught up 2 (no use,
-stopped)`. Without that judge a television at 25 Hz lost two pictures a second. That case has
-not been reproduced on the bench, so the judge is reasoned and not measured.
-The measure is the wait and not the lateness, because a 23.976 fps film on 24 Hz slides through
-every phase by a millisecond a second: in 75 s of it the offset slid down to -4, jumped
-to +36 and slid down again, which is the picture a 24 Hz screen has to repeat, and nothing was
-left out beyond the start and the option change. At 60 Hz none of this is reached with a film
-(sync offset -7.0 and -6.5 ms, nothing skipped, as before); a 60 fps film on a 59.94 Hz
-screen was caught up once in 40 s.
+For a while the renderer then left one picture out when that had lasted -- eight pictures
+running waiting more than a refresh -- and counted it in the statistics as *caught up*. It is
+gone since 2.5. It only ever saw pictures render ahead did not schedule, and there it did harm:
+measured in MPC-HC on Fight Club at 23.976 Hz with render ahead off, it left a picture out every
+half second, 245 in 135 s, each a jump followed by a picture shown twice; upstream's own filter
+showed 1 to 4 pictures twice in the same two minutes. Without it the same run shows one. A film
+that starts late with render ahead off now stays late, as it does upstream; render ahead keeps
+the step itself (below).
 
 What is left is geometry: a picture can only appear on a refresh, the audio clock and the
 screen's scan are not in step, and where a film lands between two refreshes is drawn afresh
@@ -1479,6 +1474,11 @@ So with **Render ahead** on, the renderer now gives every picture a refresh in a
   and is only moved -- a picture given a refresh more, or left out -- when the two clocks have
   drifted three quarters of a refresh apart. The nearest refresh alone would flicker between
   two whenever a picture's time fell half way.
+- A film without one -- 23.976 fps at 60 Hz, 2.5025 refreshes a picture -- takes the nearest
+  refresh, which makes the 3:2 cadence, and the time it goes by is not the picture's stamp but
+  the stamp smoothed: Matroska keeps stamps to the millisecond, 41, 42, 42, 41... ms, and each
+  time the cadence had to change step, every 8.3 s at 60.000 Hz, the rounding made the nearest
+  refresh flip five or six times in half a second. See *What the screen shows* below.
 - A redraw the player asks for while the film plays -- its message over the picture after a
   change of track -- is no longer a `Present` of its own: it landed in the same refresh as a
   picture's, which then waited a refresh, and so did every picture after it.
@@ -1519,7 +1519,12 @@ What it cannot do:
   in seven minutes with the video processor doing Super Resolution and RTX Video HDR at 4K,
   20 ms of GPU a picture out of 40. The schedule then calls the following pictures a refresh
   later, or leaves one out when that would put them too far from their time, and is back in
-  step within two pictures. It used to stay a refresh late for good.
+  step within two pictures. It used to stay a refresh late for good. The trace now says when
+  the GPU was done with each picture and how DXGI put it on the screen: on Fight Club at
+  23.976 Hz, three such pictures in 305 s, two with the statistics hidden, every one finished
+  by the GPU 3.5 to 7.6 ms before its `Present` and every picture of the film composed by the
+  desktop. It is the compositor's, and upstream's filter shows it as often (see *What the
+  screen shows*).
 - **A picture that costs most of a frame to draw** cannot be left out to any purpose: it has
   been drawn by then, and the next one is no sooner for it. With DLSS 5 NR on a 25 fps film
   that turned the rule against itself, twice. At 52 ms a picture, every one came behind its
@@ -1561,8 +1566,43 @@ starts. So an SDR picture gets three, and an HDR one keeps upstream's six.
 `MPCVR_SWAPCHAIN_BUFFERS=2` in the player's environment gives the two back, to measure it
 again.
 
-With *Render ahead* off nothing of this is used and the renderer times its `Present` as it
-did; *Wait for VBlank before Present* and *Adjust the frame presentation time* only apply then.
+With *Render ahead* off nothing of this is used and the renderer times its `Present` as
+upstream does, by *Wait for VBlank before Present* and *Adjust the frame presentation time*,
+which the page greys while render ahead is on. Render ahead never waits for a vertical blank --
+it puts the call on the one moment a refresh is worst placed -- and holds the pictures it does
+not schedule, a film's first ones and those of the *Discard* swap effect, to their time.
+
+### What the screen shows
+
+The renderer's own figures stop at the swap chain, so the screen itself was read:
+`cadence_watch` (see *Diagnostic tools*) takes every image Windows put on it through the desktop
+duplication, with the time it went there, and `cadence_report.py` says on how many refreshes
+each picture of the film stayed. Fight Club, 4K HDR output on the Panasonic television, the
+video processor resizing with Super Resolution and RTX Video HDR, in MPC-HC, two minutes of film
+for each line, on an RTX 4060:
+
+| 60.000 Hz, 23.976 fps | breaks in the 3:2 cadence | a picture shown 4 refreshes, the next 1 | on the screen against its time |
+|---|---|---|---|
+| render ahead, before 2.5 | 78 to 90, five or six in half a second every 8.3 s | 0 to 2 | −8 to +8 ms |
+| **render ahead, 2.5** | **18**, one every 8.3 s | 1 | −8 to +8 ms |
+| render ahead off, VBlank and Adjust in any of their four combinations | 108 to 140 | 2 to 4 | **+24 to +44 ms** |
+| upstream 0.10.10, VBlank off | 109 to 115 | 0 to 1 | not measured |
+| upstream 0.10.10, VBlank on | 105 to 126 | 3 to 11 | not measured |
+
+| 23.976 Hz, 23.976 fps | pictures shown twice | on the screen against its time |
+|---|---|---|
+| **render ahead** | 2 or 3 (each followed by one left out to keep the step) | **+6 to +12 ms** |
+| render ahead off, before 2.5 (the catch-up) | 32 to 241 | +51 to +96 ms |
+| render ahead off, 2.5, Adjust on | 1 | +92 to +94 ms |
+| upstream 0.10.10, any combination | 1 to 4 | not measured |
+
+A screen at 60.000 Hz needs one break in the 3:2 cadence every 8.3 s for a 23.976 fps film, and
+no renderer can do with fewer; at 59.94 Hz it needs none, and at the film's own rate the cadence
+is one refresh a picture. A player that switches the screen to the film's rate (MPC-HC's *Auto change fullscreen monitor
+mode*, 23.976 fps on 23 Hz) gets that.
+
+The duplication itself costs the compositor work: the same film at 23.976 Hz showed a picture
+twice 2 or 3 times in two minutes watched, 3 times in five minutes unwatched.
 
 ### A video delay, for a sound that arrives late
 
@@ -1743,13 +1783,16 @@ key, both DLL paths, and the working size, which is what the card can carry.
 | Setting | Default | What it does |
 |---|---|---|
 | Prefer Dolby Vision over PQ and HLG | off | For a file that carries Dolby Vision and an HDR10 or HLG layer: the Dolby Vision layer is played, adapted to the output. Dolby Vision is processed whole by the shaders, without the video processor (see *The exception: Dolby Vision*). Off, the HDR10 or HLG layer is played |
-| HDR output | Passthrough (Windows 10 and later) | *Passthrough* sends HDR video unchanged and the display tone maps it. *Tone map* adapts it to the peak in *Nits* and outputs HDR; BT.2390 uses Dolby Vision's dynamic metadata when the film has it. *Off (SDR)* outputs SDR. Needs Windows 10, Direct3D 11 and an HDR display with Windows HDR on, or allowed to turn on below. RTX Video HDR needs Passthrough |
+| HDR output | Passthrough (Windows 10 and later) | *Passthrough* sends HDR video unchanged and the display tone maps it. *Tone map* adapts it to the peak in *Nits* and outputs HDR: ACES, Reinhard, Hable, Mobius, BT.2390, or Spline, the curve of the SDR conversion's *Metadata* method brought to the display's peak. *Off (SDR)* outputs SDR. Needs Windows 10, Direct3D 11 and an HDR display with Windows HDR on, or allowed to turn on below. RTX Video HDR needs Passthrough or a tone map method |
 | Nits | 1000 | The display's real peak, 100 to 10000, for the tone mapping methods |
+| Measured peak | off | The tone mapping takes the content's peak from each picture, measured on the GPU and smoothed over a few seconds, instead of the one the file carries (MaxCLL), for every method: for files whose metadata is missing or wrong. Needs a tone map method. The statistics add an `HDR measured` line, the brightest of the last picture measured and the peak used; the measurement's time is in Finish |
+| Dolby Vision | ST 2094-10 | For Dolby Vision with dynamic metadata, while a tone map method is chosen. *ST 2094-10* is Dolby Vision's own curve, scene by scene from the metadata, whatever the method above; *Same as HDR* is the method above. Up to upstream 0.10.9 only BT.2390 turned into ST 2094-10, so a film tone mapped with another method now changes unless this is set to *Same as HDR* |
 | Windows HDR | Don't change | Whether the filter may turn Windows HDR on by itself when HDR video, or RTX Video HDR, starts: in fullscreen only, or always. *On/off* turns it back off afterwards |
 | Subtitle and OSD brightness | the leftmost | How bright subtitles, the player's messages and the statistics are drawn over an HDR picture |
-| RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs. The driver leaves out a picture the processor writes in fewer than 640x360 pixels, and the line then adds `left out by the driver under 640x360`; where the shaders resize, the processor first enlarges such a picture just past that, which the Processor step says (`to 740x312 for RTX Video HDR`) -- see *RTX Video HDR on a small picture* |
 | Convert to SDR | on | HDR video not output in HDR is converted to SDR, so that it does not look washed out |
+| Method | Metadata | How that conversion is done. *Fixed*: one curve for every film, the only one up to upstream 0.10.9. *Metadata*: a curve made for the content's peak (MaxCLL, else the mastering display's, else 1000 nits) and the SDR brightness. *Measured*: the same curve, from the peak of each picture, measured on the GPU and smoothed. Where the shaders convert the picture rather than the video processor (Dolby Vision among them), *Measured* works as *Metadata*. Its window, its floor and whether it starts over at a cut are upstream's registry-only values (`SdrPeakWindowMs`, 3000; `SdrPeakFloorNits`, 640; `SdrPeakSceneCuts`, off), which no preset holds |
 | SDR brightness | 125 nits | The target of that conversion, 25 to 400. Applies as the slider is dragged |
+| RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough or a tone map method, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs. The driver leaves out a picture the processor writes in fewer than 640x360 pixels, and the line then adds `left out by the driver under 640x360`; where the shaders resize, the processor first enlarges such a picture just past that, which the Processor step says (`to 740x312 for RTX Video HDR`) -- see *RTX Video HDR on a small picture* |
 
 ### Presentation
 
@@ -1757,13 +1800,15 @@ key, both DLL paths, and the working size, which is what the card can carry.
 |---|---|---|
 | Swap effect | Flip (recommended) | How pictures are handed to Windows. Render ahead needs Flip to give each picture a refresh. *Discard* is the older mode, for drivers that misbehave with Flip. HDR output always uses Flip |
 | Use exclusive fullscreen | off | In fullscreen the filter takes the display directly instead of going through the desktop: less latency, but menus drawn over the film may not show and Alt+Tab is slower |
-| Wait for VBlank before Present | off | Waits for the next refresh before each picture. Not used while render ahead schedules the pictures |
-| Adjust the frame presentation time | on | Holds each picture until its time on the audio clock. Not used while render ahead schedules the pictures |
 | Reinitialize device when changing display | off | Creates the Direct3D device again when the window moves to another screen |
-| Render ahead to keep audio sync | on | See *Render ahead*. Gives every picture a refresh chosen in advance, and starts each early enough for it. Needs Direct3D 11, and the flip model for the first of the two. Registry `DlssRenderAhead` |
+| Render ahead: a refresh chosen for each picture | on | See *Render ahead* and *A refresh chosen for every picture*. Gives every picture a refresh chosen in advance, and starts each early enough for it. Needs Direct3D 11, and the flip model for the first of the two. Registry `DlssRenderAhead` |
+| Wait for VBlank before Present | off | Upstream's timing, with render ahead off: waits for the next refresh before each picture. Greyed while render ahead is on, which never waits for it |
+| Adjust the frame presentation time | on | Upstream's timing, with render ahead off: holds each picture until half a refresh before its time. Greyed while render ahead is on, which always holds the pictures it does not schedule |
 | Show statistics | off | The statistics over the picture; Ctrl+J in MPC-HC |
 | Size | Fixed size | Whether the statistics keep their size or grow with the window |
-| Video delay | 0 ms | See *A video delay, for a sound that arrives late*. Every picture shown that long after its time, −200 to +500 ms, to the nearest refresh. Applies as the slider is dragged; kept out of the presets |
+| Video delay | 0 ms | See *A video delay, for a sound that arrives late*. Every picture shown that long after its time, −200 to +500 ms, to the nearest refresh. Applies as the slider is dragged |
+
+Nothing on this tab is part of a preset (see *Presets*).
 
 ### Presets
 
@@ -1786,10 +1831,13 @@ The **Presets** tab holds ten sets of settings. Each line has a name, a key, *Sa
   and neither is 1: the filter swallows the exact combination and leaves the rest to the
   player. While a text box is being typed in, it swallows nothing.
 
-A preset is every setting there is, with four exceptions that belong to the installation or
-to the moment and not to a taste: the two DLL paths, the DLSS 5 NR toggle key, the video
-delay, and whether the statistics are showing -- a preset saved while they were up used to bring them up with it. Recalling one that changes
-Direct3D 11, the swap effect, exclusive fullscreen or the texture format restarts the
+A preset is every setting there is, with exceptions that belong to the installation, the
+room or the screen and not to a taste: the two DLL paths, the DLSS 5 NR toggle key, whether the
+statistics are showing -- a preset saved while they were up used to bring them up with it --
+and the whole Presentation tab, the video delay with it. The presentation options went out in
+2.5: presets saved before hold the *Discard* swap effect and the wait for a vertical blank, and
+recalling one turned the scheduled presentation off for every SDR picture. Recalling one that
+changes Direct3D 11 or the texture format restarts the
 rendering, the same short break those options cause from the page; between two presets that
 differ only in the picture, the change is immediate. Measured with `playback_test --presets`,
 which saves a Catmull-Rom preset on F6 in the first slot and a Lanczos3 one with
@@ -1861,7 +1909,10 @@ whose total comes near the frame has no room left.
 Under the total, unnumbered, **HDR** says what becomes of HDR: passthrough, tone mapping or
 conversion to SDR, and RTX Video HDR. It is not a pass of its own and has no time: passthrough
 computes nothing, RTX Video HDR is in the processor's time, and a tone mapping or a conversion
-to SDR is in Finish's.
+to SDR is in Finish's. **HDR measured** follows it while the peak is measured (*Measured peak*,
+or the *Measured* method of the conversion to SDR): the brightest of the last picture measured
+and the peak the curve was given, smoothed over the window. The GPU measures the picture just
+before the correction or the tone mapping reads it, so that time is in Finish's too.
 
 **The timing**, in the order it happens to a picture. Its figures change with every picture,
 so each keeps its width -- the offsets to a tenth of a millisecond -- and a line does not move
@@ -1886,7 +1937,43 @@ as they change:
   and *turns late* when a picture's turn in the renderer was taken away or came late, the
   last late one's details on the line under.
 
-The sync offset graph, bottom right, draws the *Sync offset* of the last pictures.
+The sync offset graph, bottom right, draws the *Sync offset* of the last pictures. With a
+refresh chosen for each picture it draws instead where DXGI says the last picture shown really
+was, the *On screen* figure: the plan cannot show a picture the compositor took a refresh late,
+and that is the one thing worth seeing there. The green block along the bottom of the
+statistics moves a pixel for every picture drawn.
+
+### Source, audio and hardware (OSD Plus)
+
+Three seconds after the statistics first come up, they also say what the film is made of and
+what the machine is doing. This is **OSD Plus**, by **rampageX** (`github.com/rampageX/MPCVR-Plus`),
+taken into MPCVR-Plus with his thanks. Labels are white and each section's values have a colour
+of their own, kept at the *Subtitle and OSD brightness* over an HDR picture. Fight Club through
+LAV in the bench (`playback_test --file <film> --stats 1`):
+
+    Codec         : AV01
+    Video bitrate : avg 2.39 Mb/s, current 1.96 Mb/s
+    File avg      : 3.02 Mb/s (all streams + container)
+    -- Audio -----------------------------------------------------------------------
+    Audio input   : Opus, 48000 Hz, 6 ch, 32-bit, 221 kb/s
+    Audio decoded : Float PCM, 48000 Hz, 6 ch, 32-bit, 9216 kb/s
+    Audio render  : Float PCM, 48000 Hz, 6 ch, 32-bit, 9216 kb/s
+    -- Hardware --------------------------------------------------------------------
+    CPU           : 3.8% total, 1.8% player
+    GPU           : 22.6% busiest engine, decode 0.0%
+    VRAM (player) : 462 MiB
+
+- *Codec* is the coded format the decoder reads, and *Video bitrate* the video stream's own,
+  as the splitter counts it, or as the stream declares it where the splitter does not say.
+  *File avg* is the file's size over its length, every stream and the container in it, for a
+  file on a local disk only. *Source info* says why one of them is missing.
+- *Audio* follows the sound actually heard, from the decoder's input to the audio renderer's,
+  across a change of track with MPC-BE's audio switcher; where several inputs are connected and
+  none says which one plays, it does not guess. A depth the stream does not declare stays N/A.
+- *Hardware* is sampled once a second on a thread of its own: the CPU, the player's share of it,
+  the busiest engine of the GPU the picture is rendered on and its video decoder, and the video
+  memory the player uses. The sampling pauses while the statistics are hidden, and starts again
+  three seconds after a new film, so that opening one is not slowed by it.
 
 ---
 
@@ -2085,6 +2172,34 @@ The first note of a trace is the swap chain: its size, how many buffers it has a
 is exclusive. `MPCVR_SWAPCHAIN_BUFFERS=n` forces that count (see *A refresh chosen for every
 picture*).
 
+Each line also has, since 2.5: when the GPU was seen done with the picture while it waited for
+its `Present` (0 when it was not done by then), the picture's stamp and the time the schedule
+went by (see *What the screen shows*), the GPU time of the video processor's turn and of every
+step together while the statistics show (−1 otherwise), and in its flags how DXGI put the last
+picture shown on the screen: composed with the desktop, from an overlay plane, or flipped
+straight.
+
+**`cadence_watch.exe` and `cadence_report.py`** — what the screen showed, image by image, in any
+player and with any renderer, upstream's included. The watch takes every image Windows puts on
+the screen through the desktop duplication, with the time it went there, and writes for each a
+signature of the film's picture in 64 small tiles (away from the statistics and the subtitles)
+and where the statistics' green block is, which moves a pixel for every picture drawn. Times are
+on the performance counter, as in the pacing trace, so the two files line up to the
+microsecond.
+
+```
+cadence_watch.exe --out C:\temp\screen.csv --seconds 120 [--delay 8] [--shot C:\temp\osd.bmp]
+python cadence_report.py C:\temp\screen.csv [--hz 23.976] [--fps 23.976] [--list 40]
+```
+
+The report gives the screen's measured rate, on how many refreshes each new picture of the film
+stayed, and each fault with its time and how long after a cut it came: a picture held longer or
+shorter than the film's rate on that screen allows, two held alike in a 3:2 cadence (a break),
+a picture that is the one before again, or the one before that (a single-frame flash in the
+film does that too), and the green block moving other than one pixel. `--shot` keeps a picture
+of the statistics as the watch starts. The duplication is work for the compositor: it doubled
+the rare refreshes the compositor missed at 23.976 Hz.
+
 **`freeze_dump.exe`** — run against a player that hangs (by name, by process id, or with no
 argument at all), it asks Windows what every thread is waiting for, names any cycle as the
 deadlock it is, and walks each stack with the filter's own names, from the pdb beside its .ax.
@@ -2128,7 +2243,10 @@ waiting for. `--gpu` sends the pictures as D3D11 textures, the way a hardware de
 which makes the renderer run on the decoder's device; `--hdr` asks for HDR passthrough, which
 only means something while the desktop is already in HDR, and never switches the display
 itself; `--switch` walks the video processor's own extras -- RTX Video HDR, Super Resolution --
-as the chroma moves to the shaders and back; `--file <path> [--seek <seconds>]` plays a real
+as the chroma moves to the shaders and back; `--hdroff --file <HDR chart>` turns HDR output off
+and on while an HDR picture plays and reads the screen each time against the state that unticking
+and ticking *Convert to SDR* gives, which caught HDR output left in PQ for an SDR picture (meant
+for a still chart: a grey window of a Calman set); `--file <path> [--seek <seconds>]` plays a real
 film through LAV Splitter and LAV Video, the ones the installed player carries, with the sound
 rendered silently so the graph is clocked as the player clocks it. The program
 carries a Windows 10 manifest, without which the version helpers answer 6.2 and the pages grey
@@ -2141,6 +2259,7 @@ playback_test.exe --scalers       each Upscaling and Chroma upsampling method (-
 playback_test.exe --greying       what the page greys, for every state the renderer can be in and each DLSS box
 playback_test.exe --afternr --file <mkv> --seek 1740   who enlarges after DLSS 5 NR, on one still of a real film
 playback_test.exe --vpturns --file <film> --rtxhdr 1 --hdrout 1   the shaders, the processor, the processor with Super Resolution: one still each, read off the desktop unclipped (vpturns_N.pfm)
+playback_test.exe --file <film> --hdrtm 7 --measurepeak 1   HDR output: -1 off, 0 passthrough, 1..7 a tone mapping; --dovitm 0|6, --sdrtm 0..2, --tosdr, --prefdovi
 playback_test.exe --hz 30 --fps 30 --jolt   a film at the screen's own rate, and the queue it builds
 playback_test.exe --presets     two presets saved, each recalled by its key while it plays
 playback_test.exe --rewindow    the video window made again from another thread, and whose it is
@@ -2210,6 +2329,10 @@ will need regenerating.
 
 MPC Video Renderer is by **Aleksoid1978** and contributors and is licensed **GPLv3**; see
 `LICENSE.txt`. This fork is a derivative work and carries the same licence.
+
+**OSD Plus**, the statistics' source, audio and hardware lines and their colours
+(`Source/OsdPlus/`), is by **rampageX** (`github.com/rampageX/MPCVR-Plus`, GPLv3), taken from
+his release 1.0.5 with thanks.
 
 The NGX ABI declarations in `Source/DLSS/NGXTypes.h` are hand-written from the publicly
 documented shape of the interface. NVIDIA DLSS, NGX and the `nvngx_*` / `_nvngx.dll`

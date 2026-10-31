@@ -98,6 +98,37 @@ private:
 
 	CComPtr<ID3D11Buffer> m_pCorrectionConstants;
 	CComPtr<ID3D11PixelShader> m_pPSCorrection;
+
+	// per-frame measurement of the content peak, for the HDR to SDR conversion and local tone mapping
+	CComPtr<ID3D11ComputeShader>        m_pCSHdrHist;
+	CComPtr<ID3D11ComputeShader>        m_pCSHdrResolve;
+	CComPtr<ID3D11Buffer>               m_pHdrHistBuffer;
+	CComPtr<ID3D11UnorderedAccessView>  m_pHdrHistUAV;
+	CComPtr<ID3D11Buffer>               m_pHdrStateBuffer;
+	CComPtr<ID3D11UnorderedAccessView>  m_pHdrStateUAV;
+	CComPtr<ID3D11ShaderResourceView>   m_pHdrStateSRV;
+	CComPtr<ID3D11Buffer>               m_pHdrMeasureConstants;
+	CComPtr<ID3D11Buffer>               m_pHdrResolveConstants;
+	CComPtr<ID3D11Buffer>               m_pHdrStateStaging; // for the statistics only
+	bool  m_bSdrMeasureActive     = false; // the measuring variant of the correction shader is in use
+	bool  m_bHdrLocalMeasureActive = false; // the measuring variant of the local tone mapping shader is in use
+	bool  m_bHdrStatsCopyPending  = false;
+	float m_fHdrMeasuredPeakNits  = 0.0f;
+	float m_fHdrSmoothedPeakNits  = 0.0f;
+
+	struct HdrMeasureConstants_t {
+		UINT rectOrigin[2];
+		UINT rectSize[2];
+	};
+	struct HdrResolveConstants_t { // must match cbuffer ResolveConstants in cs_hdr_resolve.hlsl
+		float frameTime;
+		float releaseTime;
+		float sceneCutPQ;
+		float peakFraction;
+		float windowTime;
+		float peakFloor;
+		float padding[2];
+	};
 	const wchar_t* m_strCorrection = nullptr;
 
 	// HDR tonemapping
@@ -286,15 +317,7 @@ private:
 	uint64_t m_tickOnScreen = 0;        // GetPreciseTick() scale; 0 when DXGI would not say
 	REFERENCE_TIME m_rtOnScreenOffset = 0;
 	bool     m_bOnScreenKnown = false;
-	// Catching up a refresh: how many pictures in a row were due on the screen late,
-	// the one picture that is then not presented, and how often that was done.
 	uint64_t m_tickPresentCall = 0;     // GetPreciseTick() just before Present was called
-	unsigned m_nLateOnScreen = 0;
-	bool     m_bSkipPresent = false;
-	unsigned m_uCaughtUp = 0;
-	bool     m_bCatchUpJudged = false;  // a picture was left out and it is not yet known whether that helped
-	bool     m_bCatchUpFutile = false;  // it did not: no more until the stream is flushed
-	double   m_dWaitAtCatchUp = 0;      // how long pictures waited when the last one was left out, ms
 	uint64_t m_tickSampleStart = 0;     // GetPreciseTick() when ProcessSample began on the current sample
 	uint64_t m_presentWaitTicks = 0;    // of m_RenderStats.presentticks, the wait before Present was called
 	// Time of each step a picture goes through, for the statistics.
@@ -411,6 +434,7 @@ private:
 	bool m_bMpvLumaRan = false;
 	void MarkPictureSubmitted();
 	void HoldUntilPresentTime(const REFERENCE_TIME frameStartTime, const bool bMeasure);
+	uint64_t m_tickPictureDone = 0;     // when the GPU was seen done with the last picture held; 0: not by its Present
 
 	// Each picture given a refresh in advance, and Present called in time for it.
 	CPresentSchedule m_PresentSchedule;
@@ -514,7 +538,7 @@ public:
 	int Type() override { return VP_DX11; }
 
 	HRESULT Init(const HWND hwnd, const bool displayHdrChanged, bool* pChangeDevice = nullptr) override;
-	bool Initialized();
+	bool Initialized() const;
 
 private:
 	void ReleaseVP();
@@ -528,8 +552,16 @@ private:
 	// constants. Returns whether the number of post-scale steps changed.
 	bool UpdateSharpenShader();
 	void SetShaderConvertColorParams();
+	float GetSdrToneMappingPeak() const;
+	bool HdrMeasureSupported() const;
+	HRESULT InitHdrMeasure();
+	void ReleaseHdrMeasure();
+	HRESULT MeasureHdrPeak(const Tex2D_t& tex, const CRect& rect);
+	void ReadHdrMeasureStats();
 	void SetShaderLuminanceParams();
 
+	int HdrLocalToneMappingType() const;
+	HRESULT CreateHDR10ToneMappingShader();
 	void SetHDR10ShaderParams(float, float, float, float, float, int);
 	void SetDolbyVisionDynamicParams();
 
@@ -544,7 +576,7 @@ private:
 
 	HRESULT MemCopyToTexSrcVideo(const BYTE* srcData, const int srcPitch);
 
-	bool Preferred10BitOutput() {
+	bool Preferred10BitOutput() const {
 		return m_DisplayBitsPerChannel >= 10 && (m_InternalTexFmt == DXGI_FORMAT_R10G10B10A2_UNORM || m_InternalTexFmt == DXGI_FORMAT_R16G16B16A16_FLOAT);
 	}
 

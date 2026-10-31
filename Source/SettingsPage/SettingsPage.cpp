@@ -307,7 +307,7 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"Negligible cost: leave it on." },
 
 	// DLSS 5 NR
-	{ IDC_CHECK20,
+	{ IDC_DLSSNR_ENABLE,
 		L"Runs NVIDIA DLSS 5 neural rendering on every picture: the network rebuilds detail, "
 		"texture and local contrast, in the style chosen on the right.\n"
 		"It works at the source's size, before resizing (unless 'Apply after upscaling'); the "
@@ -379,11 +379,23 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"Passthrough: sent unchanged to the HDR display, which does the tone mapping.\n"
 		"Tone map: the renderer adapts the picture to your display's peak brightness (box on the "
 		"right) and outputs HDR.\n"
-		"BT.2390 uses Dolby Vision's dynamic metadata when the video has it.\n"
+		"Spline: the curve of the SDR conversion's Metadata method, brought to your display's "
+		"peak.\n"
 		"Off: the video is output in SDR (see the box on the right of this tab).\n"
 		"Needs Windows 10, Direct3D 11 and an HDR display with Windows HDR on, or allowed to "
 		"switch on below.\n"
-		"RTX Video HDR needs Passthrough." },
+		"RTX Video HDR needs Passthrough or a tone map method." },
+	{ IDC_CHECK20,
+		L"The tone mapping takes the peak brightness from each picture, measured by the GPU and "
+		"smoothed over a few seconds, instead of the one written in the file (MaxCLL). For files "
+		"whose metadata is missing or wrong.\n"
+		"Applies to every tone map method. Available while one is chosen. The statistics show "
+		"the peak measured and the peak used." },
+	{ IDC_COMBO_DVTM,
+		L"How Dolby Vision video with dynamic metadata is tone mapped.\n"
+		"ST 2094-10: Dolby Vision's own curve, scene by scene, from the video's metadata.\n"
+		"Same as HDR: the method chosen above.\n"
+		"Available while a tone map method is chosen." },
 	{ IDC_EDIT_DISPLAYMAX,
 		L"Your display's real peak brightness in nits (100 to 10000), used by the tone mapping "
 		"methods.\n"
@@ -398,13 +410,23 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"picture: about 100, 200 or 330 nits from left to right." },
 	{ IDC_CHECK19,
 		L"The NVIDIA driver turns SDR video into HDR.\n"
-		"Needs HDR output set to Passthrough, an HDR display with Windows HDR on, an NVIDIA RTX "
-		"card, the 64-bit filter, Direct3D 11, a bit depth other than 8-bit (Source tab), and a "
-		"format converted by the video processor. Applies to SDR video only.\n"
+		"Needs HDR output set to Passthrough or a tone map method, an HDR display with Windows "
+		"HDR on, an NVIDIA RTX card, the 64-bit filter, Direct3D 11, a bit depth other than "
+		"8-bit (Source tab), and a format converted by the video processor. Applies to SDR "
+		"video only.\n"
 		"The statistics show a star (*) when it is really running." },
 	{ IDC_CHECK14,
 		L"When HDR video is not output in HDR (SDR display, Windows HDR off, or HDR output set to "
 		"Off), converts it to SDR so that it doesn't look washed out." },
+	{ IDC_COMBO_SDRTM,
+		L"How HDR video is converted to SDR.\n"
+		"Fixed: one curve for every video.\n"
+		"Metadata: a curve made for the video's peak brightness (MaxCLL, else the mastering "
+		"display's peak, else 1000 nits) and the SDR brightness below.\n"
+		"Measured: the same curve, from the peak of each picture, measured by the GPU and "
+		"smoothed over a few seconds. Where the shaders convert the picture rather than the "
+		"video processor (Dolby Vision, for one), it works as Metadata.\n"
+		"Available while Convert to SDR is on." },
 	{ IDC_SLIDER2,
 		L"Target brightness of that conversion, in nits (25 to 400). Applies while you drag, so "
 		"you can judge it on the picture." },
@@ -421,23 +443,22 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"desktop. Lower latency, but menus and windows drawn over the video may not show, and "
 		"Alt+Tab is slower." },
 	{ IDC_CHECK15,
-		L"Waits for the screen's next refresh before sending each picture. Can reduce tearing on "
-		"some setups, but adds up to one refresh of delay.\n"
-		"Not used while Render ahead schedules the pictures: it already sends each one right "
-		"after a refresh." },
+		L"Upstream's timing, for Render ahead off: waits for the screen's next refresh before "
+		"sending each picture. Adds up to a refresh of delay.\n"
+		"Render ahead never waits for it." },
 	{ IDC_CHECK13,
-		L"Holds each picture until its exact time on the audio clock, instead of showing it as "
-		"soon as it is ready. Keeps the picture in sync with the sound: leave it on.\n"
-		"Not used while Render ahead schedules the pictures." },
+		L"Upstream's timing, for Render ahead off: holds each picture until half a refresh "
+		"before its time on the audio clock, instead of sending it as soon as it is drawn.\n"
+		"Render ahead always holds the pictures it does not schedule this way." },
 	{ IDC_CHECK16,
 		L"Recreates the Direct3D device when the player window moves to another screen. Only "
 		"needed if the picture is wrong after moving the player between monitors." },
 	{ IDC_CHECK26,
 		L"Prepares each picture in advance and shows it on the screen refresh closest to its time "
-		"on the audio clock, so heavy processing (DLSS, neural upscalers) never makes it late.\n"
+		"on the audio clock, whatever the processing costs (DLSS, neural upscalers, Super "
+		"Resolution). Without it a picture reaches the screen a refresh or two after its time.\n"
 		"The statistics then show 'scheduled', and how many pictures were repeated or dropped.\n"
-		"Needs Direct3D 11. Scheduling each picture needs the Flip swap effect (always used for "
-		"HDR)." },
+		"Needs Direct3D 11 and the Flip swap effect (always used for HDR)." },
 	{ IDC_CHECK2,
 		L"Shows the renderer's statistics over the picture: formats, processing steps and their "
 		"cost, sync offset.\n"
@@ -666,7 +687,16 @@ void CVRSettingsPPage::FillCombos()
 	Combo_AddData(Item(IDC_COMBO10), L"Tone map: Reinhard", 2);
 	Combo_AddData(Item(IDC_COMBO10), L"Tone map: Hable", 3);
 	Combo_AddData(Item(IDC_COMBO10), L"Tone map: Mobius", 4);
-	Combo_AddData(Item(IDC_COMBO10), L"Tone map: BT.2390 / DV", 5);
+	Combo_AddData(Item(IDC_COMBO10), L"Tone map: BT.2390", 5);
+	Combo_AddData(Item(IDC_COMBO10), L"Tone map: Spline", 7);
+
+	// Upstream 0.11's: 6 is ST 2094-10, 0 the method of the list above.
+	Combo_AddData(Item(IDC_COMBO_DVTM), L"ST 2094-10", 6);
+	Combo_AddData(Item(IDC_COMBO_DVTM), L"Same as HDR", 0);
+
+	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Fixed",    SDRTM_Fixed);
+	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Metadata", SDRTM_Metadata);
+	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Measured", SDRTM_Measured);
 
 	Combo_AddData(Item(IDC_COMBO11), L"Default",   DLSSNR_STYLE_Default);
 	Combo_AddData(Item(IDC_COMBO11), L"Natural",   DLSSNR_STYLE_Natural);
@@ -777,8 +807,11 @@ void CVRSettingsPPage::SetControls()
 	} else {
 		Combo_SelectData(Item(IDC_COMBO10), -1);
 	}
+	SetCheck(IDC_CHECK20, m_SetsPP.bHdrLocalMeasurePeak);
+	Combo_SelectData(Item(IDC_COMBO_DVTM), m_SetsPP.iHdrDoviToneMappingType);
 	SetCheck(IDC_CHECK18, m_SetsPP.bHdrPreferDoVi);
 	SetCheck(IDC_CHECK14, m_SetsPP.bConvertToSdr);
+	Combo_SelectData(Item(IDC_COMBO_SDRTM), m_SetsPP.iSdrToneMappingType);
 	SetCheck(IDC_CHECK19, m_SetsPP.bVPRTXVideoHDR);
 	Send(IDC_COMBO7, CB_SETCURSEL, m_SetsPP.iHdrToggleDisplay, 0);
 	Send(IDC_SLIDER1, TBM_SETPOS, 1, m_SetsPP.iHdrOsdBrightness);
@@ -797,7 +830,7 @@ void CVRSettingsPPage::SetControls()
 	Send(IDC_SLIDER8, TBM_SETPOS, TRUE, (LPARAM)(m_SetsPP.iVideoDelay / VIDEO_DELAY_STEP));
 	SetText(IDC_EDIT10, DelayText(m_SetsPP.iVideoDelay).c_str());
 
-	SetCheck(IDC_CHECK20, m_SetsPP.bDlssNR);
+	SetCheck(IDC_DLSSNR_ENABLE, m_SetsPP.bDlssNR);
 	SetCheck(IDC_CHECK21, m_SetsPP.bDlssNRAutoMask);
 	SetCheck(IDC_CHECK23, m_SetsPP.bDlssNRAfterUpscale);
 	Combo_SelectData(Item(IDC_COMBO11), m_SetsPP.iDlssNRStyle);
@@ -844,14 +877,23 @@ void CVRSettingsPPage::EnableControls()
 		// Super Resolution is settled below, with the rest of what the processor is
 		// really doing: asking for it is not enough to make it happen.
 #ifdef _WIN64
-		Enable(IDC_CHECK19, bEnable && m_SetsPP.bHdrPassthrough);
+		Enable(IDC_CHECK19, bEnable && (m_SetsPP.bHdrPassthrough || m_SetsPP.bHdrLocalToneMapping));
 #endif
 	}
 
 	Enable(IDC_STATIC8, m_SetsPP.bConvertToSdr);
 	Enable(IDC_EDIT1, m_SetsPP.bConvertToSdr);
 	Enable(IDC_SLIDER2, m_SetsPP.bConvertToSdr);
+	Enable(IDC_STATIC_SDRTM, m_SetsPP.bConvertToSdr);
+	Enable(IDC_COMBO_SDRTM, m_SetsPP.bConvertToSdr);
 	Enable(IDC_EDIT_DISPLAYMAX, m_SetsPP.bHdrLocalToneMapping);
+	// The Dolby Vision method and the measured peak qualify a tone mapping, as upstream has it.
+	{
+		const BOOL bLocal = m_SetsPP.bUseD3D11 && m_SetsPP.bHdrLocalToneMapping && IsWindows10OrGreater();
+		for (const int id : { IDC_CHECK20, IDC_STATIC_DVTM, IDC_COMBO_DVTM }) {
+			Enable(id, bLocal);
+		}
+	}
 
 	// The five that decide each other, worked out in Greying.h so the bench can put
 	// the same question to them without a film and without a page.
@@ -883,12 +925,17 @@ void CVRSettingsPPage::EnableControls()
 	// Render ahead and the chroma replacement belong to the Direct3D 11 processor.
 	Enable(IDC_CHECK26, m_SetsPP.bUseD3D11);
 	Enable(IDC_CHECK27, m_SetsPP.bUseD3D11);
+	// Upstream's two ways of timing Present, which render ahead does not use: it never
+	// waits for a vertical blank, and holds what it does not schedule to its time.
+	const BOOL bUpstreamTiming = !(m_SetsPP.bUseD3D11 && m_SetsPP.bDlssRenderAhead);
+	Enable(IDC_CHECK15, bUpstreamTiming);
+	Enable(IDC_CHECK13, bUpstreamTiming);
 
 	// DLSS. The path boxes stay live even when the feature is off, so a wrong path
 	// can be fixed without enabling it first.
 	const BOOL bD3D11 = m_SetsPP.bUseD3D11;
 	const BOOL bNROn  = bD3D11 && m_SetsPP.bDlssNR;
-	for (const int id : { IDC_CHECK20, IDC_STATIC27, IDC_EDIT7, IDC_BUTTON2, IDC_STATIC29, IDC_COMBO13 }) {
+	for (const int id : { IDC_DLSSNR_ENABLE, IDC_STATIC27, IDC_EDIT7, IDC_BUTTON2, IDC_STATIC29, IDC_COMBO13 }) {
 		Enable(id, bD3D11);
 	}
 	for (const int id : { IDC_CHECK21, IDC_CHECK23, IDC_COMBO11, IDC_COMBO12,
@@ -982,7 +1029,8 @@ HRESULT CVRSettingsPPage::OnActivate()
 	}
 	if (!IsWindows10OrGreater()) {
 		for (const int id : { IDC_COMBO10, IDC_STATIC5, IDC_COMBO7, IDC_STATIC6,
-				IDC_SLIDER1, IDC_STATIC7, IDC_COMBO8, IDC_CHECK19 }) {
+				IDC_SLIDER1, IDC_STATIC7, IDC_COMBO8, IDC_CHECK19,
+				IDC_CHECK20, IDC_STATIC_DVTM, IDC_COMBO_DVTM }) {
 			Enable(id, FALSE);
 		}
 	}
@@ -1095,7 +1143,7 @@ INT_PTR CVRSettingsPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, 
 			if (bToggled) {
 				m_bDlssNRSeen = current.bDlssNR;
 				m_SetsPP.bDlssNR = current.bDlssNR;
-				SetCheck(IDC_CHECK20, m_SetsPP.bDlssNR);
+				SetCheck(IDC_DLSSNR_ENABLE, m_SetsPP.bDlssNR);
 			}
 			EnableControls();
 		}
@@ -1151,13 +1199,14 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_CHECK17, &m_SetsPP.bDeintBlend,          false },
 				{ IDC_CHECK18, &m_SetsPP.bHdrPreferDoVi,       false },
 				{ IDC_CHECK19, &m_SetsPP.bVPRTXVideoHDR,       false },
-				{ IDC_CHECK20, &m_SetsPP.bDlssNR,              true  },
+				{ IDC_CHECK20, &m_SetsPP.bHdrLocalMeasurePeak, false },
+				{ IDC_DLSSNR_ENABLE, &m_SetsPP.bDlssNR,        true  },
 				{ IDC_CHECK21, &m_SetsPP.bDlssNRAutoMask,      false },
 				{ IDC_CHECK23, &m_SetsPP.bDlssNRAfterUpscale,  false },
 				{ IDC_CHECK25, &m_SetsPP.bDlssSR,              true  },
 				{ IDC_CHECK28, &m_SetsPP.bDlssSRDlaa,          false },
 				{ IDC_CHECK29, &m_SetsPP.bUpscalingSmall,      true  },
-				{ IDC_CHECK26, &m_SetsPP.bDlssRenderAhead,     false },
+				{ IDC_CHECK26, &m_SetsPP.bDlssRenderAhead,     true  },
 				{ IDC_CHECK27, &m_SetsPP.bVPReplaceChroma,     true  },
 			};
 			for (const auto& c : checks) {
@@ -1270,6 +1319,8 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_COMBO12, &m_SetsPP.iDlssNRPreset,    false },
 				{ IDC_COMBO13, &m_SetsPP.iDlssNRToggleKey, false },
 				{ IDC_COMBO15, &m_SetsPP.iDlssSRPreset,    false },
+				{ IDC_COMBO_DVTM,  &m_SetsPP.iHdrDoviToneMappingType, false },
+				{ IDC_COMBO_SDRTM, &m_SetsPP.iSdrToneMappingType,     false },
 			};
 			for (const auto& c : byData) {
 				if (nID == c.id) {
@@ -1291,7 +1342,7 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 					m_SetsPP.iTexFormat = value;
 					SetDirty();
 #ifdef _WIN64
-					Enable(IDC_CHECK19, m_SetsPP.bUseD3D11 && m_SetsPP.bHdrPassthrough
+					Enable(IDC_CHECK19, m_SetsPP.bUseD3D11 && (m_SetsPP.bHdrPassthrough || m_SetsPP.bHdrLocalToneMapping)
 						&& m_SetsPP.iTexFormat != TEXFMT_8INT);
 #endif
 				}
@@ -1300,24 +1351,15 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 
 			if (nID == IDC_COMBO10) {
 				// One list for two fields: passthrough, or a local tone mapping of a
-				// given kind.
-				const LRESULT value = Send(IDC_COMBO10, CB_GETCURSEL);
-				switch (value) {
-				case 0:
-					m_SetsPP.bHdrPassthrough = false;
-					m_SetsPP.bHdrLocalToneMapping = false;
-					break;
-				case 1:
-					m_SetsPP.bHdrPassthrough = true;
-					m_SetsPP.bHdrLocalToneMapping = false;
-					break;
-				case 2: case 3: case 4: case 5: case 6:
-					m_SetsPP.bHdrPassthrough = false;
-					m_SetsPP.bHdrLocalToneMapping = true;
-					m_SetsPP.iHdrLocalToneMappingType = (int)value - 1;
-					break;
-				default:
-					break;
+				// given kind. By item data: Spline is 7, after a 6 that is Dolby Vision's.
+				if (Send(IDC_COMBO10, CB_GETCURSEL) == CB_ERR) {
+					return (INT_PTR)1;
+				}
+				const int value = (int)Combo_CurData(Item(IDC_COMBO10));
+				m_SetsPP.bHdrPassthrough = (value == 0);
+				m_SetsPP.bHdrLocalToneMapping = (value > 0);
+				if (value > 0) {
+					m_SetsPP.iHdrLocalToneMappingType = value;
 				}
 				SetDirty();
 				EnableControls();
@@ -1573,14 +1615,9 @@ bool CVRSettingsPPage::OnPresetCommand(int nID, int action)
 		if (action == BN_CLICKED) {
 			Settings_t sets;
 			if (S_OK == m_pVideoRenderer->LoadPreset(slot, sets)) {
-				// Where the DLLs are and the toggle key belong to the installation,
-				// and the video delay to the room: a preset saved before there was
-				// one would otherwise bring it back to zero.
-				sets.iDlssNRToggleKey = m_SetsPP.iDlssNRToggleKey;
-				sets.bShowStats = m_SetsPP.bShowStats;
-				sets.iVideoDelay = m_SetsPP.iVideoDelay;
-				wcscpy_s(sets.szDlssNRDllPath, m_SetsPP.szDlssNRDllPath);
-				wcscpy_s(sets.szDlssSRDllPath, m_SetsPP.szDlssSRDllPath);
+				// What belongs to the installation, the room and the screen stays as
+				// the page has it (KeepOutOfPreset), as when a preset's key recalls it.
+				KeepOutOfPreset(sets, m_SetsPP);
 				m_SetsPP = sets;
 				SetControls();
 				EnableControls();

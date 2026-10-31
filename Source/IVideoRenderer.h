@@ -107,6 +107,22 @@ enum :int {
 #define SDR_NITS_MAX 400
 #define SDR_NITS_STEP  5
 
+// HDR to SDR conversion method
+enum :int {
+	SDRTM_Fixed = 0, // fixed curve
+	SDRTM_Metadata,  // curve built from the HDR metadata and the SDR display nits
+	SDRTM_Measured,  // the same curve, from the peak measured in each frame
+	SDRTM_COUNT
+};
+
+// Tuning of SDRTM_Measured. Registry only: SdrPeakWindowMs, SdrPeakFloorNits and SdrPeakSceneCuts.
+#define SDR_PEAK_WINDOW_DEF 3000 // ms
+#define SDR_PEAK_WINDOW_MIN    0
+#define SDR_PEAK_WINDOW_MAX 10000
+#define SDR_PEAK_FLOOR_DEF   640 // nits
+#define SDR_PEAK_FLOOR_MIN     0
+#define SDR_PEAK_FLOOR_MAX 10000
+
 constexpr inline auto HDR_NITS_DEF = 1000;
 constexpr inline auto HDR_NITS_MIN = 100;
 constexpr inline auto HDR_NITS_MAX = 10000;
@@ -213,9 +229,15 @@ struct Settings_t {
 	int  iHdrToggleDisplay;
 	int  iHdrOsdBrightness;
 	bool bConvertToSdr;
+	int  iSdrToneMappingType;
+	int  iSdrPeakWindowMs;
+	int  iSdrPeakFloorNits;
+	bool bSdrPeakSceneCuts;
 	int  iSDRDisplayNits;
 	bool bHdrLocalToneMapping;
 	int  iHdrLocalToneMappingType;
+	bool bHdrLocalMeasurePeak;
+	int  iHdrDoviToneMappingType; // 6 = ST 2094-10, 0 = the HDR method
 	int iHdrDisplayMaxNits;
 	// DLSS 5 Neural Rendering. Strengths are stored x100 so the whole struct
 	// stays integral and round-trips through the DWORD-only registry.
@@ -335,15 +357,23 @@ struct Settings_t {
 			bHdrPassthrough             = true;
 			bHdrLocalToneMapping        = false;
 			iHdrLocalToneMappingType    = 1;
+			bHdrLocalMeasurePeak        = false;
+			iHdrDoviToneMappingType     = 6;
 			iHdrDisplayMaxNits          = 1000;
 		} else {
 			bHdrPassthrough             = false;
 			bHdrLocalToneMapping        = false;
 			iHdrLocalToneMappingType    = 1;
+			bHdrLocalMeasurePeak        = false;
+			iHdrDoviToneMappingType     = 6;
 			iHdrDisplayMaxNits          = 1000;
 		}
 		iHdrToggleDisplay               = HDRTD_Disabled;
 		bConvertToSdr                   = true;
+		iSdrToneMappingType             = SDRTM_Metadata;
+		iSdrPeakWindowMs                = SDR_PEAK_WINDOW_DEF;
+		iSdrPeakFloorNits               = SDR_PEAK_FLOOR_DEF;
+		bSdrPeakSceneCuts               = false;
 		iHdrOsdBrightness               = 0;
 		iSDRDisplayNits                 = SDR_NITS_DEF;
 		bDlssNR                         = false;
@@ -402,6 +432,30 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 	wcscpy_s(dst.szDlssSRDllPath, src.szDlssSRDllPath);
 	// bDlssRenderAhead is not here: it belongs to the main page, which sets it for
 	// the prescalers as much as for DLSS.
+}
+
+// What a preset does not carry, because it belongs to the installation, the room or the
+// screen rather than to a taste: where the two DLLs are, the DLSS toggle key, how late the
+// room's sound is, the Measured method's tuning (registry only, as upstream has it),
+// whether the statistics are up, and the whole of the Presentation tab. Presets saved by
+// earlier versions hold a Discard swap effect and the wait for a vertical blank, and
+// recalling one turned the scheduled presentation off for every SDR picture.
+inline void KeepOutOfPreset(Settings_t& sets, const Settings_t& current)
+{
+	sets.iDlssNRToggleKey     = current.iDlssNRToggleKey;
+	sets.iSdrPeakWindowMs     = current.iSdrPeakWindowMs;
+	sets.iSdrPeakFloorNits    = current.iSdrPeakFloorNits;
+	sets.bSdrPeakSceneCuts    = current.bSdrPeakSceneCuts;
+	wcscpy_s(sets.szDlssNRDllPath, current.szDlssNRDllPath);
+	wcscpy_s(sets.szDlssSRDllPath, current.szDlssSRDllPath);
+	sets.iVideoDelay          = current.iVideoDelay;
+	sets.bShowStats           = current.bShowStats;
+	sets.iSwapEffect          = current.iSwapEffect;
+	sets.bExclusiveFS         = current.bExclusiveFS;
+	sets.bVBlankBeforePresent = current.bVBlankBeforePresent;
+	sets.bAdjustPresentTime   = current.bAdjustPresentTime;
+	sets.bReinitByDisplay     = current.bReinitByDisplay;
+	sets.bDlssRenderAhead     = current.bDlssRenderAhead;
 }
 
 constexpr int PRESET_COUNT = 10;

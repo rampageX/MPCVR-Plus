@@ -130,6 +130,14 @@ ECHO Building the player driver (a real MPC-HC taken through the renderer's opti
 cl /nologo /EHsc /std:c++20 /O2 /MT mpchc_drive.cpp ^
    /Fe:mpchc_drive.exe /link user32.lib gdi32.lib || EXIT /B 1
 
+ECHO Building the OSD audio test (which input the statistics follow, rampageX's cases)...
+cl /nologo /EHsc /std:c++20 /O2 /MT osd_audio_test.cpp ^
+   /Fe:osd_audio_test.exe || EXIT /B 1
+
+ECHO Building the cadence watch (what the screen showed, image by image)...
+cl /nologo /EHsc /std:c++20 /O2 /MT /DUNICODE /D_UNICODE cadence_watch.cpp ^
+   /Fe:cadence_watch.exe || EXIT /B 1
+
 DEL /Q *.obj *.exp *.cso *.res 2>NUL
 
 ECHO.

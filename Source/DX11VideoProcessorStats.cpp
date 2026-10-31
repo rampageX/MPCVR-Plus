@@ -366,6 +366,16 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		}
 		Line(L"  HDR", hdr, -1, false);
 	}
+	// Upstream's Measured method: the brightest of the last picture measured, and the peak
+	// the curve was given, smoothed over the window. Read back a picture or two late, never
+	// waited for; its cost is in Finish.
+	if ((m_bSdrMeasureActive || m_bHdrLocalMeasureActive) && m_fHdrMeasuredPeakNits > 0.0f) {
+		// the SDR shader keeps the peak above the display's own, so this is what it used
+		const float usedNits = m_bSdrMeasureActive
+			? std::clamp(m_fHdrSmoothedPeakNits, static_cast<float>(m_iSDRDisplayNits) + 1.0f, 10000.0f)
+			: std::min(m_fHdrSmoothedPeakNits, 10000.0f);
+		Line(L"  HDR measured", std::format(L"frame peak {:.0f}, used {:.0f} nits", m_fHdrMeasuredPeakNits, usedNits), -1, false);
+	}
 
 	// -- How the picture reaches the screen, in the order it happens.
 	Rule(L"Timing", nullptr);
@@ -425,9 +435,6 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 	} else
 	if (m_bOnScreenKnown) {
 		str += std::format(L"\nOn screen     : {:+6.1f} ms, queue {}", m_rtOnScreenOffset / 10000.0, m_uPresentQueue);
-		if (m_uCaughtUp) {
-			str += std::format(L", caught up {}{}", m_uCaughtUp, m_bCatchUpFutile ? L" (no use, stopped)" : L"");
-		}
 	}
 
 #if SYNC_OFFSET_EX
