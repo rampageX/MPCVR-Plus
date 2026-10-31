@@ -1,37 +1,27 @@
-# MPCVR-Plus OSD v1.0.5
+# MPCVR-Plus OSD v1.0.6
 
 ## Changes
 
-- ArtCNN keeps its shared neighbourhood where one invocation writes one texel
-- The Jinc chroma sums its four parities in one pass, without a branch
-- Sharpening ends on the dither when it is the last step before it
-- A picture that only has to be put in its place is read there by the next step
-- DLSS 5 NR and the renderer wait for each other on the GPU, not on the CPU
-- The stabilizer and the composition draw their passes with one helper
-- The Information page names the guides DLSS 5 NR is given
-- This fork's own parts of the D3D11 processor move to files of their own
-- The reference is taken again, after a review of the whole filter
-- Upstream 0.10.9 comes in
-- The bench reads an HDR desktop in half floats, and pauses a film under each way of enlarging
-- A 10-bit picture asked for as a DIB is converted no wider than the DIB
-- Super Resolution on an 8-bit picture is given eight bits to write on an HDR desktop
-- The chroma replacement waits for a picture really interlaced
-- The statistics say when the driver leaves RTX Video HDR out
-- A small picture the shaders enlarge is first enlarged past 640x360 for RTX Video HDR
-- The manual says what RTX Video HDR needs of a picture, and what the chroma replacement waits for
-- The Scaling step starts where the processor left the picture
-- The reference is taken again, after upstream 0.10.9 and the RTX Video HDR fixes
-- Add independent OSD Plus version display
+- Integrate MPCVR-Plus 2.5 and MPC Video Renderer 0.11.1.
+- Include upstream HDR-to-SDR Metadata and Measured modes, Spline tone mapping, Dolby Vision tone mapping selection, and R10k input support.
+- Include upstream presentation timing, render-ahead settings, preset isolation, and HDR state fixes.
+- Preserve OSD-Plus version labels, colored statistics, audio metadata, adapter-specific monitoring, and hidden sync graph with text statistics retained.
+- Upstream 2.5 now includes OSD Plus and credits rampageX.
+
+## Validation
+
+- Audio input selection and reported bit-depth regression checks passed with UndefinedBehaviorSanitizer.
+- OSD integration hooks and merge conflict markers checked.
+- Win32 and x64 filters built by GitHub Actions.
+- This release has not been playback-tested on an RTX 4080 or the user's laptop. Compilation and portable checks do not replace Windows playback acceptance.
 
 ## Accepted build
 
-- Source commit: `b86cfbaf42d43cae31d7eda5b1fb4cbd4d4adf97`
-- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/40543448373
+- Source commit: `4dab32a3ba35818114c0f6349342773e71a284d8`
+- Upstream tag: `MPCVR-Plus-2.5` (`8f1bf90e7c468e362e8b2d1be16ed4f664ea1f5a`)
+- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/41189687801
 - Publication reuses this successful build without rebuilding the filters.
-- Confirm playback acceptance before committing these release files.
 
 ## Package
 
-Includes Win32 and x64 filters, English documentation, build provenance
-and a SHA-256 package checksum. Existing functionality and limitations
-remain as documented in OSD-PLUS.md.
+Includes Win32 and x64 filters, English documentation, build provenance and a SHA-256 package checksum. Existing limitations remain documented in OSD-PLUS.md.

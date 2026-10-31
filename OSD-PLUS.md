@@ -1,5 +1,12 @@
 # OSD Plus (rampageX fork)
 
+## Version 1.0.6
+
+Integrates the pinned MPCVR-Plus 2.5 release (`8f1bf90e7c468e362e8b2d1be16ed4f664ea1f5a`),
+including MPC Video Renderer 0.11.1. Upstream 2.5 now includes OSD Plus; this
+fork retains its independent version label and hides the sync graph while
+keeping text statistics. Future updates remain ordinary Git merges.
+
 ## Branches and upstream updates
 
 `dlss5` stays the upstream mirror. All local features and their build workflow
@@ -80,7 +87,8 @@ Compare the original and preview with the same player settings and files:
 - Toggle OSD; hardware data should appear after about four seconds.
 - Check label/value colors, SDR/HDR brightness and clipping at different sizes.
 - Compare GPU counters with Task Manager on the actual rendering GPU. CPU uses
-  elapsed CPU time, which can differ from frequency-normalized Windows displays.
+  Windows Processor Utility when available, with elapsed busy time as fallback.
+  Player CPU remains process CPU time divided by total system capacity.
 - Check H.264/HEVC/AV1 with the player's splitter; unsupported metadata is N/A.
 - Seek, pause, resume, switch files and close repeatedly; no stale data or hang.
 - Test video decode and a GPU-heavy processing path; confirm no added dropped
