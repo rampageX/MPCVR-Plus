@@ -8,7 +8,7 @@ rendering is bit-identical to upstream.
 |---|---|
 | **Scaling** | six upscalers chosen by measurement — ArtCNN C4F16 DS, FSRCNNX 8/16, RAVU-zoom and the anti-ringing versions — with both lists ordered best first |
 | **Chroma** | three more methods, and a 4:4:4 pre-pass that hands the hardware video processor a full picture: +7 dB of colour on 10-bit film |
-| **Detail** | sharpening after the resize, two methods and five calibrated levels |
+| **Detail** | deblocking (PP7, or SPP for a powerful GPU) and debanding on the decoded planes, and sharpening after the resize, each with five calibrated levels; a TV channel's logo found and hidden |
 | **DLSS 5 NR** | NVIDIA neural reconstruction (NGX feature 18) with a temporal stabilizer made for video |
 | **DLSS SR** | DLSS Super Resolution 4.5 for enlarging, and DLAA at native size (experimental) |
 | **Presentation** | render ahead, so none of it drifts off the audio clock |
@@ -44,7 +44,7 @@ the feature is off, and the rendering is bit-identical to upstream in that state
 |---|---|
 | GPU | NVIDIA RTX. Developed and tested on an RTX 3050 (Ampere), driver r596 |
 | OS | Windows 10 1703 or later (shared fences), x64 only |
-| Player | MPC-BE or any DirectShow player that lets you force a renderer |
+| Player | MPC-BE, MPC-HC, or any DirectShow player that lets you force a renderer (*In MPC-BE and in MPC-HC*, below) |
 | DLL | `nvngx_dlssnr.dll` — **not included, see below** |
 | Optical Flow | `nvofapi64.dll`, installed with the NVIDIA driver (RTX 20 series and later). Optional: without it nothing is steadied, and the statistics say why |
 | DLSS Super Resolution | Optional: `nvngx_dlss.dll` 310.5 or later (DLSS 4.5), from the public [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) repository (`lib/Windows_x86_64/rel`). Developed with 310.9.1 |
@@ -65,6 +65,29 @@ The **DLSS 5 NR** tab of the settings page has a **DLL** field and a browse butt
 it elsewhere.
 `nvngx_dlss.dll`, for DLSS Super Resolution, is searched the same way and has its own field;
 it must keep its name, because the driver's NGX runtime loads it by name from that folder.
+
+### In MPC-BE and in MPC-HC
+
+Both players know this renderer as **MPC Video Renderer**, by the identifier it shares with the
+original, and have one place for it in their list: a renderer with an identifier of its own is
+one neither of them could choose at all. So MPCVR-Plus takes the original's place, in each
+player in its own way.
+
+- **MPC-BE** uses the renderer registered in Windows. `Install_MPCVR_64.cmd`, run as
+  administrator, registers this one. Installing or updating MPC-BE registers its own copy
+  again, and the last one registered is the one used.
+- **MPC-HC** uses the copy in its own folder first, `MPCVR\MpcVideoRenderer64.ax` beside
+  `mpc-hc64.exe`, and a registered renderer only when that copy is not there: registering
+  MPCVR-Plus changes nothing in MPC-HC. Put `MpcVideoRenderer64.ax` and the `dlss` folder in
+  that `MPCVR` folder instead, keeping the original's file aside to put it back. An update of
+  MPC-HC puts its own copy back.
+- **Both renderers on one machine** -- MPC-BE with one and MPC-HC with the other, or two
+  MPC-HC, one of them portable, each with its own copy in its `MPCVR` folder -- keep their own
+  settings. MPCVR-Plus's are under `HKCU\Software\MPC-BE Filters\MPC Video Renderer Plus`, and
+  the first time it runs it copies the original's key there, presets included, and leaves the
+  original's as it was. Through 2.7 the two shared the original's key, and the original set the
+  methods it does not have -- the upscalers, Spline36, the chroma methods added here -- back to
+  its own defaults the first time its page was applied.
 
 ---
 
@@ -297,19 +320,19 @@ and one that does not fit the 41.7 ms a picture lasts is left out undrawn:
 
 | film | working size | drawing (median) | pictures drawn |
 |---|---|---|---|
-| The Shepherd, 3840x2160 HDR | 100 % | 71.6 ms | 440 of 873 |
+| a 3840x2160 HDR film | 100 % | 71.6 ms | 440 of 873 |
 | | 75 % | 51.4 ms | 462 of 908 |
 | | 60 % | 36.6 ms | 876 of 911 |
 | | 55 % | 32.5 ms | 910 of 912 |
 | | 50 % | 29.0 ms | 907 of 909 |
-| Kill Bill, 3840x1600 HDR | 100 % | 56.6 ms | 432 of 856 |
+| a 3840x1600 HDR film | 100 % | 56.6 ms | 432 of 856 |
 | | 75 % | 36.1 ms | 881 of 885 |
 | | 70 % | 32.7 ms | 884 of 886 |
 | | 60 % | 25.7 ms | 890 of 892 |
 
 Where every picture but a few was drawn, those few are the first, while the session starts,
-and one more in Kill Bill at 75 %, 9.4 s in. On this card a 3840x2160 film wants 55 % and a
-3840x1600 one 75 %; a faster card wants less taken off, and the statistics' *Total* line, against
+and one more in the 3840x1600 film at 75 %, 9.4 s in. On this card a 3840x2160 film wants 55 %
+and a 3840x1600 one 75 %; a faster card wants less taken off, and the statistics' *Total* line, against
 the frame it names, says how much room is left. A new working size is taken on Apply, and the network starts
 again at it: seven pictures went undrawn in the bench while it did
 (`playback_test --nrscale 100 --nrscaleto 70`).
@@ -419,7 +442,7 @@ where it was in the last eight frames and no longer is, the picture differs from
 with no object at all by 3.4 to 3.9 thousandths of luma against 2.9 to 4.0 without vectors
 (×1000, at a quarter of the resolution), and exact vectors leave the same, 3.5 to 4.0: the
 larger effect building up again on what the object uncovers. The raw vectors the box sent
-steadied less, and least on a film that weaves: on the wall of *Cyrano*, DLSS 5 NR and the
+steadied less, and least on a film that weaves: on the wall of *film A* (below), DLSS 5 NR and the
 stabilizer shimmered 1.21 times the source without vectors, 1.12 with the raw ones, 1.04 with
 the cleaned ones (`--tsrclipnr`).
 
@@ -604,7 +627,7 @@ the grain's: hence *Experimental* on the option.
 
 **A film that weaves.** On film a background that holds still is not still: the frame moves in
 the gate, and a scanned picture moves by a fraction of a pixel from one frame to the next. On
-*Cyrano* (2021), the wall behind the actors at 00:32:24, which shimmered under DLSS SR, moves
+*film A*, the wall behind the actors at 00:32:24, which shimmered under DLSS SR, moves
 0.48 source pixel a frame on average, and 62 % of the frames more than 0.4. The median of
 Optical Flow's blocks came out short of that motion, and under the 0.4-pixel dead zone PASS 4
 then had on 77 % of the frames: DLSS was told the wall had not moved, resampled its history to
@@ -624,7 +647,7 @@ taken to zero measured worse, on films that hardly move, than the same motion fo
 moves on its own left out. The figure is the shimmer of what holds still once that motion is
 taken out, against the source's own:
 
-| | *Cyrano*, the wall | *Boudu* (1932) | *Casimir* (1950) |
+| | *Film A*, the wall | *Film B* (1932) | *Film C* (1950) |
 |---|---|---|---|
 | The film's weave, pixel a frame | 0.48 | 0.03 | 0.01 |
 | The median global motion (until 2.0) | 1.14× | 0.47× | 0.79× |
@@ -634,7 +657,7 @@ taken out, against the source's own:
 | Preset K, refined | 0.21× | 0.26× | 0.48× |
 
 The refinement costs 0.1 to 0.3 ms a frame at 1080p, timed in turns with the median on the same
-frames. Preset K is steadier still, and softer: 8 % less detail on the wall of *Cyrano*. With
+frames. Preset K is steadier still, and softer: 8 % less detail on the wall of *film A*. With
 DLSS 5 NR before DLSS SR, as the filter chains them, the wall went from 1.51 to 0.43 times the
 source's shimmer (`--tsrclipnr`); and DLSS SR's vectors computed on the picture before the
 network serve as well as those computed after it, 0.43 either way, which is what one Optical
@@ -644,12 +667,12 @@ Flow shared by the two would see. DLSS SR keeps its own, on the picture it enlar
 the picture before a cut belonged to another shot: where a bright shot followed a darker one,
 it blended the dark one in, and the bright parts of the new shot came out darker for two or
 three pictures — seen in playback, not when stepping picture by picture. A seek resets DLSS; a
-cut did not. `--tsrcut` measures it on the cuts seen in playback, *La Firme* at 16:17 and
-*Cyrano* at 36:59, and one two seconds before the first: what the enlarged picture, brought
+cut did not. `--tsrcut` measures it on the cuts seen in playback, *film D* at 16:17 and
+*film A* at 36:59, and one two seconds before the first: what the enlarged picture, brought
 back to the source's size, lacks on the pixels that brightened across the cut, against the
 level the new shot settles at, ×1000 on luma, on the first three pictures of the new shot:
 
-| | *La Firme*, 16:15 | *La Firme*, 16:17 | *Cyrano*, 36:59 |
+| | *Film D*, 16:15 | *Film D*, 16:17 | *Film A*, 36:59 |
 |---|---|---|---|
 | 2.1 | 62.9, 7.6, 3.6 | 85.3, 24.8, 9.8 | 114.6, 35.3, 12.3 |
 | **Now** | **0.1, 0.3, -0.1** | **0.6, 0.4, -0.3** | **0.5, 0.2, 0.5** |
@@ -669,12 +692,12 @@ structure — the correlation under 0.25 and the difference three times.
 
 The light alone missed the cuts out of a shot that already changed a lot on every picture, a
 chase or a car under trees; the correlation alone missed the flashes, which DLSS dims with the
-pictures before them as it darkens a bright shot after a dark one: a flash of *Dances with
-Wolves* came out 41.9 thousandths of luma too dark over three quarters of the picture, and is
+pictures before them as it darkens a bright shot after a dark one: a flash of *film G* came
+out 41.9 thousandths of luma too dark over three quarters of the picture, and is
 right now (0.0). `--tcutscan` runs the detection alone over minutes of a film, beside ffmpeg's
-own scene score of each picture. Over 48 minutes of six films — *La Firme*, *Cyrano*, *Fight
-Club*, *Indiana Jones and the Last Crusade* in HDR, *Les assassins sont parmi nous* (1946) and
-the buffalo hunt of *Dances with Wolves* — it called 571 pictures, every one of the 296 where
+own scene score of each picture. Over 48 minutes of six films — *film D*, *film A*, the
+bench's film, *film E* in HDR, *film F* (1946) and a hunt in *film G* — it called 571
+pictures, every one of the 296 where
 ffmpeg's score passes 0.3 among them. Of the other 275, 169 have a correlation of 0.1 at most,
 cuts ffmpeg scores lower; 45 are flashes and flickering lights; the rest are the splices of the
 1946 print and the dust of the hunt. What came closest without being called is dust and blur
@@ -1212,7 +1235,7 @@ under 340 with the shaders. Where the shaders resize and RTX Video HDR is on, th
 enlarges such a picture first, keeping its shape, just past 640x360 (640x270 to 740x312), and
 the shaders enlarge the rest; the Processor step says `to 740x312 for RTX Video HDR`, and the
 Scaling step starts from there (`740x312 -> 3840x1620 FSRCNNX 16 AR`). It costs
-some of the shaders' enlargement, measured on Fight Club reduced to 640x266 and enlarged back
+some of the shaders' enlargement, measured on a film reduced to 640x266 and enlarged back
 to 1920x800, against the original:
 
 | Enlarged by | Luma PSNR | Detail kept |
@@ -1234,10 +1257,346 @@ space it was asked for, and the SDR swap chain showed a dim, grey picture, every
 
 ---
 
+## Deblocking and debanding
+
+A codec short of bits leaves two kinds of damage a renderer can still take out. Block codecs
+without a loop filter -- MPEG-2 (DVDs, standard-definition TV), MPEG-4 part 2 (XviD, DivX) --
+show their 8 x 8 blocks and ring along contours. The codecs that smooth their own blocks --
+H.264, HEVC, AV1 -- flatten slow gradients into steps instead: bands across a sky, a wall, a
+fade. madVR has an *artifact removal* for both, with an algorithm of its own that is not
+public; this one is made of two that are, written again for Direct3D and measured against
+FFmpeg's own implementations of them.
+
+**Both work on the decoded planes, before anything converts or resizes the picture.** That
+is where the codec made the damage: luma in 8 x 8 blocks at its own size, chroma in 8 x 8
+blocks at its own, the steps in the code values it coded. Whatever converts the picture then
+reads the cleaned planes in place of the decoder's -- the conversion shader, the 4:4:4
+pre-pass, or the hardware video processor, whose own input they are written back into, in
+its own format. So nothing changes who resizes, RTX Video HDR in the processor gets the
+cleaned picture, and the chroma is upsampled after the cleaning by whoever upsamples it. That
+order was measured, not assumed: the chroma deblocked at its own size and then upsampled
+keeps 0.2 dB more of the picture's own full-size chroma than the other way round, with
+bilinear and with Catmull-Rom alike, on every case (MPEG-2 q8 with Catmull-Rom: 50.54 dB
+against 50.35, 49.52 untouched; `dlssnr_harness --tclean --study`) -- an upsampler that
+sharpens sharpens the block edges first.
+
+Progressive video in planes (NV12, P010, P016, YV12 and the other planar formats), Direct3D
+11. RGB sources have no codec planes, packed formats (YUY2, v210, AYUV...) hold luma and
+chroma in one texture, and an interlaced picture is two fields woven, so those three pass
+untouched, and the statistics say why. **With RTX Video Super Resolution chosen, both step
+aside**: it cleans the picture itself, in its own network, and it is not cleaned twice.
+
+### Deblocking: PP7 or SPP
+
+Two methods are offered, both of FFmpeg's, from MPlayer:
+
+- **PP7** (`pp7`), the light one: for each pixel, the 7 x 7 window around it is transformed,
+  the coefficients under the quantizer the codec is assumed to have used are dropped, and only
+  the centre is rebuilt.
+- **SPP** (`spp`), for a powerful GPU: the same idea over 8 x 8 blocks, on eight grids shifted
+  against one another (FFmpeg's own offsets), each block rebuilt whole and the eight results
+  averaged.
+
+Neither needs the codec's quantizers nor its grid, so a cropped or rescaled source is no
+different from another: on blocks moved four pixels off the grid they give the same figures
+to the hundredth.
+
+They were measured on 16 pictures made from nine film frames, their planes coded as MPEG-2
+intra blocks, with SPP's other grid counts beside them. Each method at the strength that
+suits each case best, psnr of luma and chroma together, and `block` the luma's steps across
+the codec's grid over its steps elsewhere (the truth reads 1.00):
+
+| | MPEG-2 q4 | | MPEG-2 q8 | | JPEG 0.72 | | 1080p | 2160p |
+|---|---|---|---|---|---|---|---|---|
+| | psnr | block | psnr | block | psnr | block | ms | ms |
+| untouched | 47.32 | 2.04 | 44.45 | 2.89 | 46.89 | 1.81 | — | — |
+| **PP7** | 48.26 | 1.22 | 45.56 | 1.28 | 47.72 | 1.16 | **0.28** | **1.09** |
+| SPP, 4 grids | 48.67 | 1.19 | 45.84 | 1.30 | 47.99 | 1.17 | 0.46 | 1.83 |
+| **SPP, 8 grids** | 48.85 | 1.02 | 46.02 | 1.09 | 48.14 | 1.01 | **0.88** | **3.46** |
+| SPP, 64 grids | 48.91 | 1.03 | 46.06 | 1.02 | 48.18 | 1.02 | 6.53 | 25.80 |
+
+The time is one picture's three planes in 4:2:0 on an RTX 4060. The cleaning had a budget:
+half a millisecond for deblocking and debanding together at 1080p on this card, so that it
+stays light on a small one. PP7 is the only one that fits it, and keeps about two thirds of
+the gain of SPP over 8 grids for a third of its cost. SPP over 8 grids is the choice for a
+card with time to spare: of the steps the codec added across its grid, it leaves 1 to 5 %
+where PP7 leaves 15 to 21 %. Four grids leave as many as PP7 for 1.6 times its time, and 64
+come within 0.04 to 0.06 dB of 8 for seven times the cost, so neither is offered.
+
+Through the real encoders the same pictures went through (`clean_refs.py`, FFmpeg 9.0),
+against FFmpeg's own filters at each one's best setting:
+
+| Encode | untouched | **PP7 here** | **SPP here**, 8 grids | FFmpeg `pp7` | FFmpeg `spp`, 64 grids | FFmpeg `deblock` |
+|---|---|---|---|---|---|---|
+| MPEG-2 q4 | 47.23 | 47.90 | **48.21** | 47.37 | 47.66 | 47.22 |
+| MPEG-2 q8 | 44.65 | 45.46 | **45.73** | 45.11 | 45.38 | 45.06 |
+| MPEG-2 q12 | 43.23 | 44.09 | **44.33** | 43.86 | 44.04 | 43.79 |
+| XviD q12 | 41.85 | 42.88 | **43.12** | 42.67 | 42.88 | 42.57 |
+| x264 CRF 38 | 38.39 | 38.57 | 38.64 | — | — | — |
+| x265 CRF 40 | 38.73 | 38.88 | 38.96 | — | — | — |
+
+The methods are FFmpeg's; what differs here is that they compute in floating point and keep
+16 bits until the conversion reads them, where FFmpeg works in integers and writes 8. So SPP
+over 8 grids here is ahead of FFmpeg's over 64 by 0.24 to 0.55 dB. On the codecs
+with a loop filter there is little left to take out: 0.15 to 0.25 dB.
+
+### The five deblocking levels
+
+Each level is the strength that does best on one rung of a ladder of damage: MPEG-2 intra
+blocks at quantiser_scale_code 2, 4, 8, 12 and 16 (`--tclean --ladder`), for each method on
+its own, so that a level means the same damage whichever is chosen. The thresholds are
+FFmpeg's *medium* ones, its default for pp7. For PP7, *soft* ones reach one to two tenths of a
+decibel more at their best and leave more of the blocks there, and at equal blocking the two
+are within 0.1 dB; for SPP, medium is the best of the three on every rung.
+
+| Level | made for | untouched | PP7 | | SPP | |
+|---|---|---|---|---|---|---|
+| | | psnr / block | quantizer | psnr / block | quantizer | psnr / block |
+| 1 | MPEG-2 q2 | 49.88 / 1.57 | 1.5 | 50.99 / 1.10 | 1.5 | 51.58 / 0.99 |
+| 2 | MPEG-2 q4 | 47.32 / 2.04 | 2.5 | 48.28 / 1.17 | 2 | 48.85 / 1.02 |
+| **3** (default) | MPEG-2 q8 | 44.45 / 2.89 | 4 | 45.56 / 1.28 | 3 | 46.02 / 1.09 |
+| 4 | MPEG-2 q12 | 42.90 / 3.78 | 6 | 44.04 / 1.35 | 5 | 44.45 / 1.06 |
+| 5 | MPEG-2 q16 | 41.81 / 4.60 | 8 | 43.00 / 1.40 | 6 | 43.37 / 1.10 |
+
+On a clean picture every level costs detail -- level 1 takes it from 59.06 to 55.89 dB with
+PP7 and to 54.83 with SPP, level 3 to 50.75 and 50.93 -- so it is for the sources that need it,
+and off for a Blu-ray.
+
+### Debanding: libplacebo's
+
+The shipped debanding is **libplacebo's**, the one mpv runs and FFmpeg's `libplacebo` filter
+too, translated function for function: for each iteration, four samples a quarter turn apart
+round the pixel, at a random distance up to the radius times the iteration, averaged; the pixel
+takes the average when it is within the threshold of it, divided by the iteration. A step one
+or two code levels high is under the threshold and is smoothed away; an edge is not. Its random
+numbers are libplacebo's own pcg3d, seeded by the picture's time, so that a picture paused or
+drawn again stays as it was. The shader is checked against a double-precision reference written
+from libplacebo's code, to within 0.6 of an R16 step (`dlssnr_harness --tclean`).
+
+Measured with **CAMBI**, Netflix's banding score in libvmaf (0: no banding to see), on 88
+pictures that went through x264, x265 and SVT-AV1 at the strengths a starved stream has
+(`clean_refs.py --cambi`). The untouched pictures, read at the 10 bits the cleaning writes,
+score 10.0 (x264 CRF 38) and 11.5 (SVT-AV1 CRF 60). psnr and detail are the change against the
+untouched picture, averaged over the eight encodes:
+
+| Level | iterations / threshold / radius | CAMBI | psnr | detail |
+|---|---|---|---|---|
+| 1 | 1 / 2 / 16 | 0.56 | +0.01 | 0.00 |
+| 2 | 1 / 4 / 16 | 0.33 | +0.02 | -0.01 |
+| **3** (default) | 2 / 4 / 16 | 0.10 | +0.01 | -0.01 |
+| 4 | 2 / 6 / 20 | 0.05 | -0.04 | -0.03 |
+| 5 | 3 / 8 / 24 | 0.02 | -0.15 | -0.06 |
+
+Up to level 3 it takes nothing measurable from the picture. The threshold is in thousandths
+of the plane's range, as libplacebo's, so a level means the same on 8 and on 10 bits.
+FFmpeg's own `deband` and `gradfun`, on the same encodes written at 8 bits (6.47 untouched
+there), leave 0.87 and 1.76.
+
+**No grain.** libplacebo adds a fine grain after the smoothing, to hide what is left, and with
+it every level reads 0 on CAMBI. It was measured and left out: at libplacebo's default amount it
+costs 1.5 dB on a clean picture, and it makes the smooth parts of a still picture move from one
+picture to the next by half as much again (1.38 to 2.02 thousandths of the range; `--tclean
+--study`, section 5), where the smoothing alone already takes out 93 to 99.8 % of the banding.
+
+### What they cost
+
+One picture's three planes in 4:2:0 on the RTX 4060 (`dlssnr_harness --tclean`): the
+deblocking 0.28 ms at 1080p and 1.10 ms at 2160p with PP7, 0.88 and 3.44 with SPP, whatever
+the level; the debanding 0.10, 0.13, 0.18, 0.19 and 0.31 ms over its five levels at 1080p
+(0.39 to 1.33 at 2160p). PP7 and the debanding at their default levels, 0.46 and 1.80 ms; both
+at level 5, 0.59 and 2.43. SPP and the debanding, 1.06 and 4.15 ms; at level 5, 1.20 and 4.79.
+The statistics give the figure for the film playing, on the *Artifacts* step.
+
+### With DLSS 5 NR and with RTX Video Super Resolution
+
+DLSS 5 NR does not take the blocks out by itself: on the MPEG-2 pictures at q8 it leaves the
+blocking at 3.45 times the steps elsewhere, where it was 3.76, and the deblocking (PP7) before
+it brings that to 1.32, 1.4 dB closer to the clean picture (`--tclean --withnr`; every row through
+RGB, as the network works). Against banding, the debanding before the network measured nothing
+more. The two are meant to be used together on a damaged source.
+
+RTX Video Super Resolution does its own cleaning, at 1:1 as well: on the same picture through
+the filter it took the blocking from 1.67 to 1.18 by itself (`playback_test --clean`), which is
+why the deblocking list and the debanding box step aside for it.
+
+## Hiding a channel's logo
+
+A recording of a TV channel carries its logo in a corner from the first picture to the last.
+**Hide the channel logo**, in the Detail tab, takes it out of the picture as discreetly as can
+be done in real time, before anything else touches the picture. No published real-time shader
+does this; the method is that of the offline tools made for it, measured here and written again
+for Direct3D.
+
+**A broadcaster lays its logo the same way on every picture**, with an opacity and a colour of
+its own for every pixel:
+
+    seen = (1 - alpha) x picture + alpha x colour
+
+That is the model of AviUtl's *delogo* filter and of *logoscan*, its analyser (MakKi). Where
+alpha and the colour are known the picture under a translucent logo is not guessed but worked
+back out, exactly: picture = (seen - alpha x colour) / (1 - alpha). Where the logo is opaque
+there is nothing under it to find, and the picture is filled in from round it; in between the
+two are mixed, by how far each can be trusted. So the hiding has two halves.
+
+**Finding the logo.** *Find the logo* starts an analysis on the film playing; nothing has to be
+drawn round the logo. One picture every 0.4 s of the film is read back from the GPU without
+the render thread ever waiting for it, and worked on by a thread of its own:
+
+1. *Where it is*: the share of pictures that have an edge at each pixel, as *LogoScan* (a
+   rewrite of logoscan) finds it -- a logo keeps its edges while the film changes under it.
+   The frame's border, the edges of black bars (not the bars themselves: a channel often lays
+   its logo across a bar's edge) and groups longer than half the picture are left out,
+   letters close together make one logo, and a logo is taken when two looks in a row, ten
+   pictures apart, find it in the same place.
+2. *What it is*: for every pixel of the logo's box and every plane, the line that takes the
+   picture under it (carried in from round the box, then from the pixels found free of the
+   logo as well) to what is seen there, over the pictures that follow. Its slope gives alpha,
+   so the exact shape comes out with it, the holes in the letters included. Pictures the logo
+   was not on -- advertising, a fade -- are found and left out after a first fit, as LogoScan
+   leaves them out.
+
+**Taking it out**, on every picture, on the GPU, on the decoded planes at their own size, before
+the deblocking: the picture worked back out where the logo lets it through, a fill from round
+it where it does not (a push-pull, Gortler et al.), with the fine detail of the picture next
+to the logo mirrored into the fill so that an opaque logo does not leave a smooth patch of its
+shape on a textured background. How far a pixel's inversion is trusted was measured for that
+pixel when the logo was fitted: it holds inside a translucent logo, and badly on the edge of an
+opaque one, which the codec smears into the picture differently on every picture. And the logo
+is not always there: each picture, the shader measures how strongly it is on screen and takes
+out that much of it, so advertising and the logo's own fades leave no inverted ghost.
+
+**Across a black bar.** A channel shows a wide film between black bars and leaves its logo
+where it always is, so the logo often sits half over the bar and half over the picture,
+as on two of the recordings tried. The two halves are kept apart:
+
+- *Fitting it*: over the bar the picture under the logo never changes, and the line cannot
+  tell alpha from colour there. But the logo's colour can be read where it is over the
+  picture, and most logos have one, white as a rule: alpha over the bar is what takes the
+  bar to what is seen. A logo of several colours is taken as opaque over the bar instead. On
+  the film it was found on, either gives the bar back; on another, where that part of the
+  logo is over the picture, the first is worked out from under it where the second can only
+  be filled. Each row of the bar is its own level: the last before the picture is often a
+  little lighter.
+- *The rows the encoder blended*: the picture's first rows next to the bar are often a blend
+  of the two, the picture darkened by as much all along the edge, which the line reads as a
+  black logo laid across the whole box. A row is taken as blended when the picture round the
+  logo on it follows less than 0.97 of the changes of the row three in: 0.19, 0.61 and 0.95
+  on the three after the bar of one recording, 0.37 on the one of the other, 0.994
+  to 1.04 where there is no blend. The logo's alpha does not depend on what is under it: the
+  rows blended take it from the first row clear of the blend.
+- *Taking it out*: on every picture the shader tells which rows (and columns) at the box's
+  edges are a bar's -- near black, under 20 levels, and flat round the logo, from the box's
+  edge inwards. Bars measure 15 to 18 levels. Under 25, with a bar's rows filled rather than
+  inverted, dark scenes of the bench's film passed for one, and its outlined logo came back
+  at 45.6 dB instead of 51.1; under 20, with the inversion trusted, it is 51.1 as without the
+  bars told. On a bar's row the fill is that row's own level and the inversion is trusted as
+  anywhere: over a real bar it gives the bar back. (Taking an inversion within a few levels of the bar as the bar was measured too:
+  nothing gained on the bench's logo across the bar, a little less of the channel's outline
+  left on the two recordings, 0.028 and 0.033 against 0.033 and 0.040, and 0.3 dB lost on the outlined
+  logo, where a dark scene passes for a bar.) The picture's side is filled from the picture
+  alone: a fill across the edge smears the bar into the picture and the picture into the bar.
+
+**Each logo found is kept** (`%LOCALAPPDATA%\MPC-BE Filters\MPC Video Renderer\logos\`, 32 at
+most) and recognised on the next films of the same size: the first pictures of a film are
+tried against every logo kept for its size, each a couple of pixels either way, and the one on
+screen is hidden from then on. The *Logo* list names each logo kept for pictures of the film's
+size by its size and where it sits ("298 x 72 px top right"), the last used first:
+*Automatic* leaves the choice to the recognition, and a logo chosen in it is hidden at once on
+the film playing, for when it was not recognised. *Forget the logos* empties the folder.
+
+**Margin**: the pixels round the logo worked with it, for an edge the encoder smeared further
+than the analysis saw. Each pixel is worked only as far as the fit doubts it, so a wider margin
+leaves a clean edge as it is; but the patch filled in grows with it, and on a detailed
+background its shape can show. 1 is the default and what measured best; 0 to 3.
+
+Progressive two-plane video (NV12, P010, P016), Direct3D 11. An interlaced picture, an RGB or
+a packed source and three-plane formats pass untouched, and the statistics say why. **RTX Video
+Super Resolution leaves it on**, as it does not hide logos: with Super Resolution chosen the
+deblocking and the debanding step aside and the logo is still taken out, in the processor's own
+input. A logo that moves or changes, such as an animated one, is not what this is for.
+
+### What it is worth
+
+`dlssnr_harness --tlogo` lays six logos of known alpha and colour over pictures of a film
+taken 0.4 s apart and made 1920 x 1080 with black bars, as a channel shows a wide film:
+white letters at 55 % with holes in them, opaque letters on a dark rim, a badge from 25 to 75 %
+with its text cut out, a thin "HD" 18 pixels high, a channel's name in white with a red
+dot and two coloured letters, and white letters at 40 % read upwards, half over the bar above
+the picture and half over the picture. The analysis runs on them as on a film -- it looks for
+the logo, fits it on the pictures after, and the pictures after those are the test, with
+stretches without the logo and fades among both.
+
+**Found**: every one of the six by the 20th picture looked at, the box round it holding all of
+it. Fitted on 120 pictures, the pixels taken for the logo's overlap its own by 0.79 to 1.00
+(IoU), and alpha is out by 0.001 to 0.008 on average over the box.
+
+**Taken out**, the luma where the logo was (its pixels and two round them) against the picture
+without it, in dB:
+
+| Logo | left on screen | taken out, as laid | through x264 at 3 Mbit/s |
+|---|---|---|---|
+| translucent | 12.6 | 51.6 | 41.5 |
+| outlined | 8.0 | 51.1 | 43.6 |
+| gradient | 12.0 | 45.6 | |
+| small "HD" | 11.3 | 51.9 | 44.8 |
+| channel's name | 8.8 | 47.7 | 39.6 |
+| across the bar | 14.9 | 53.6 | 40.2 |
+
+(as laid: fitted on 120 pictures; through x264: the whole film with the logo encoded at a
+channel's rate and decoded, fitted on 240 pictures as the renderer fits, `--tlogo --study`.)
+Through the codec the logo's edge is smeared differently on every picture, and the inversion
+there is less sure than the fill: each pixel's doubt is weighed 30 times, chosen on the first
+four, where it gains 1.0 to 1.7 dB over 3 (the channel's name 38.6 dB against 39.6, the outlined
+letters 42.0 against 43.6) and leaves less of the outline. On a logo laid exactly and never
+encoded it costs the translucent one 5 dB, from 52.8 to 47.4, which no broadcast is.
+
+**The detail mirrored in** gives the opaque parts back 34 to 61 % of the fine detail of the
+picture they hide, where the fill alone gave them 21 to 33 %, for 0.09 to 0.17 dB: a texture
+that is not the hidden one is further from it than a smooth one, and looks more like the
+picture round it.
+
+**The margin**, through x264: 0 pixels costs 0.8 to 2.4 dB against 1 on all five; 2 is within
+0.5 dB of 1, better on three logos and worse on two; 3 is below 1 on three. 1 is the default.
+
+**On and off screen**: the strength measured on the test pictures reads at most 0.011 where the
+logo is not there, and at least 0.965 where it is, so a picture without it is left as it is.
+
+**Across the bar**, the sixth logo: a locator that leaves the bars out stops the box at the
+bar's edge, round half the logo. This one's box holds all of it, and through x264 alpha is out
+by 0.0011 on average over the box and its colour by 2.2 levels, against 0.047 and 58.5 with the
+bar's part taken as opaque (`--study`); taken out, the place comes back at 40.2 dB, and at 28.0
+with the bar's rows taken for picture. The logo's colour where it is over the picture, from its
+10th to its 90th percentile over the pixels at least 20 % opaque, each counted by its alpha
+squared as its colour is known to its alpha's error over its alpha, spreads 1.7 to 22.2 levels
+on the logos of one colour (through x264 too, and the channel's on the two recordings) and 99
+to 221 on those of several: one colour is taken under 51 levels.
+
+**On a real recording**, a TV film (1080p25 H.264 at 3.2 Mbit/s, the channel's name in opaque
+white with a coloured dot, in a corner over a wide film between bars):
+the logo is found 15 seconds into the film and hidden from 27 s, and the analysis is done at
+113 s (`playback_test --logo`). Fitted on 120 pictures and on 240, alpha differs by 0.002.
+
+**Across a bar, on real recordings**: a channel's logo, translucent white letters in the top
+left corner, half over the bar of a wide film. On one recording (1080p25 HEVC)
+a locator that leaves the bars out boxes 58 x 88 pixels from row 136 there, half the logo;
+this one holds all of it, 64 x 188 from row 36, fitted at 0.32 opaque on average over the bar
+as over the picture. On another (720p25 H.264) the same, 52 x 132. What is left of the
+outline it found once it is taken out (0: gone, 1: untouched, `--tlogo --real`): 0.033 and
+0.040. In the filter (`playback_test --logo`), *Find the logo* pressed ten minutes into
+the first: the same channel's logo, kept from another of its films, hides it from the first
+half second, the logo is found whole 11 seconds in and the analysis done at 100 s, whether the
+processor or the shaders enlarge; 0.1 ms a picture.
+
+**What it costs**, a picture, on the RTX 4060 (`--tlogo`): 0.067 to 0.125 ms at 1080p and 0.25
+to 0.46 ms at 2160p, depending on the logo's size, of which copying the two planes takes 0.03
+and 0.19 ms, and telling the bars on every picture 0.012 to 0.022 ms at 1080p. The analysis
+copies one picture back every 0.4 s and works on it on its own thread. The statistics give the
+figure for the film playing, on the *Logo* step: 0.1 ms on the TV film above.
+
 ## Sharpening
 
 A sharpener restores nothing: it exaggerates. The whole question is *where it is allowed to*,
-and the two offered here answer it differently. The pass runs after the resize and before the
+and the three offered here answer it differently. The pass runs after the resize and before the
 dither, so it works whatever enlarged the picture -- the hardware processor, a prescaler, or
 nothing at all on a film already at the screen's size, which is the case nothing else in this
 filter can reach. Subtitles are drawn after it and are never sharpened.
@@ -1251,6 +1610,12 @@ extreme.
 really covers -- the principle of AviSynth's LimitedSharpenFaster, and the same clamp the
 prescalers already use against the networks. At an edge that range spans the whole step, so the
 step still gets steeper; what it cannot do any more is shoot past it, which is the halo.
+
+**AMD CAS** is the contrast adaptive sharpening of AMD's FidelityFX (MIT), written again for
+this pass: a cross of four neighbours drawn from the pixel by a weight that falls where the 3x3
+around it already spans a wide range, so that it cannot overshoot what that 3x3 holds. AMD moves
+the kernel's peak between -1/8 and -1/5 with its own sharpness knob; the middle is taken here,
+and the level does the rest. It came after the other two, asked for by name.
 
 ### What each one is worth
 
@@ -1271,7 +1636,9 @@ edges, x1000; `grain` is the fine detail left in flat areas, output over referen
 | CAS + the same clamp | 44.75 | 0.052 | 3.824 | 38.77 | 37.64 | 0.83 ms |
 | RCAS (FSR 1) | 44.73 | 0.055 | 3.901 | 38.63 | 37.62 | 0.51 ms |
 
-The two that ship are the two ends of one trade. **Adaptive-Sharpen is the only one that does
+Adaptive-Sharpen and Unsharp + Clamp are the two ends of one trade, and AMD CAS sits
+between them, a little behind both on the grainy and the compressed source, nearly as light as
+the unsharp mask. **Adaptive-Sharpen is the only one that does
 not amplify the grain** -- on a clean master it leaves *less* fine detail in flat areas than
 doing nothing at all -- and on the two sources that matter, grain and compression, it is the
 only one that costs almost nothing: 0.16 dB and 0.05 dB, where the next best costs 0.38 and
@@ -1286,24 +1653,38 @@ which leaves B - Y and R - Y exactly as they were.
 
 ### The five levels
 
-A level means the same amount of sharpening whichever method is chosen. The two are not on the
-same scale -- and neither is on the scale the comparison above was made on, since a picture
+A level means the same amount of sharpening whichever method is chosen. The methods are not on
+the same scale -- and neither is on the scale the comparison above was made on, since a picture
 halved and enlarged again is far softer than anything this renderer produces, and
 Adaptive-Sharpen holds back where the edges are already steep. So the levels are calibrated
 through the filter itself, on a 1080p film enlarged to 3200x1334, as the gain in mean gradient
-each one really buys:
+each one really buys. Adaptive-Sharpen's are the anchor, set in 1.6 at +4, +8, +13, +20 and
++28 %; the other two give, on the same chain, the gain Adaptive-Sharpen's level gives:
 
-| Level | gain in detail | Adaptive-Sharpen | Unsharp + Clamp |
-|---|---|---|---|
-| 1 | +4 % | 0.22 | 0.45 |
-| 2 | +8 % | 0.33 | 0.62 |
-| **3** (default) | **+13 %** | **0.46** | **0.83** |
-| 4 | +20 % | 0.68 | 1.17 |
-| 5 | +28 % | 0.99 | 1.49 |
+| Level | gain in detail (1.6) | Adaptive-Sharpen | Unsharp + Clamp | AMD CAS |
+|---|---|---|---|---|
+| 1 | +4 % | 0.22 | 0.64 | 0.30 |
+| 2 | +8 % | 0.33 | 0.90 | 0.43 |
+| **3** (default) | **+13 %** | **0.46** | **1.18** | **0.57** |
+| 4 | +20 % | 0.68 | 1.60 | 0.78 |
+| 5 | +28 % | 0.99 | 2.13 | 1.05 |
 
-Measured back through the filter, level 1 gives +3.7 % and +2.8 %, level 3 +13.2 % and +13.0 %,
-level 5 +28.3 % and +27.9 %. Level 3 is the +13 the quality measurements settle on; 4 and 5 are
-past it, for a taste rather than for fidelity.
+Level 3 is the +13 the quality measurements settle on; 4 and 5 are past it, for a taste rather
+than for fidelity.
+
+`playback_test --sharpencal` reads them: it plays the film, pauses it on the same picture under
+every setting, and reads the displayed picture's mean luma gradient with each method at a run
+of strengths, set through `MPCVR_SHARPEN_STRENGTH`, then at its levels as they ship. Each level
+of Unsharp + Clamp and of AMD CAS is the strength that gives Adaptive-Sharpen's gain, read on
+three chains -- the shaders enlarging with Catmull-Rom, Jinc2 and FSRCNNX 16 AR, 1920x800 to
+3200x1334 -- and averaged. AMD CAS follows Adaptive-Sharpen closely: the three chains agree to
+0.05 of a strength. Unsharp + Clamp answers the enlarger's own sharpness more, to 0.23. Read
+back as they ship, under Jinc2, levels 1 to 5 give +7.5, +10.7, +14.2, +19.7 and +26.9 % for
+Adaptive-Sharpen, +6.6, +9.5, +12.8, +18.0 and +24.9 % for Unsharp + Clamp and +6.9, +10.1,
++13.6, +19.0 and +26.1 % for AMD CAS. Until 2.8 Unsharp + Clamp's levels were 0.45 to 1.49,
+which on the same picture gave +4.6, +6.4, +8.7, +12.7 and +16.6 %: about two thirds of
+Adaptive-Sharpen's gain, the two having been made equal on a picture and a chain the 1.6
+calibration did not record.
 
 It adds to RTX Video Super Resolution and to DLSS, which sharpen in their own way; nothing here
 prevents that, and the tooltip says so.
@@ -1407,7 +1788,7 @@ its time, the same after 20 s as at the start, with the Sync offset reading +8 t
 For a while the renderer then left one picture out when that had lasted -- eight pictures
 running waiting more than a refresh -- and counted it in the statistics as *caught up*. It is
 gone since 2.5. It only ever saw pictures render ahead did not schedule, and there it did harm:
-measured in MPC-HC on Fight Club at 23.976 Hz with render ahead off, it left a picture out every
+measured in MPC-HC on a film at 23.976 Hz with render ahead off, it left a picture out every
 half second, 245 in 135 s, each a jump followed by a picture shown twice; upstream's own filter
 showed 1 to 4 pictures twice in the same two minutes. Without it the same run shows one. A film
 that starts late with render ahead off now stays late, as it does upstream; render ahead keeps
@@ -1520,11 +1901,14 @@ What it cannot do:
   20 ms of GPU a picture out of 40. The schedule then calls the following pictures a refresh
   later, or leaves one out when that would put them too far from their time, and is back in
   step within two pictures. It used to stay a refresh late for good. The trace now says when
-  the GPU was done with each picture and how DXGI put it on the screen: on Fight Club at
+  the GPU was done with each picture and how DXGI put it on the screen: on a film at
   23.976 Hz, three such pictures in 305 s, two with the statistics hidden, every one finished
   by the GPU 3.5 to 7.6 ms before its `Present` and every picture of the film composed by the
-  desktop. It is the compositor's, and upstream's filter shows it as often (see *What the
-  screen shows*).
+  desktop. Upstream's filter shows it as often (see *What the screen shows*). The compositor
+  only carries it: with RTX Video Super Resolution or DLSS SR on an NVIDIA card, Windows'
+  hardware-accelerated GPU scheduling turned off, a service of NVIDIA's holds the GPU's work up
+  now and then and the compositor's flip with it. Turned on, none in thirteen minutes (see
+  *Known limitations*).
 - **A picture that costs most of a frame to draw** cannot be left out to any purpose: it has
   been drawn by then, and the next one is no sooner for it. With DLSS 5 NR on a 25 fps film
   that turned the rule against itself, twice. At 52 ms a picture, every one came behind its
@@ -1577,7 +1961,7 @@ not schedule, a film's first ones and those of the *Discard* swap effect, to the
 The renderer's own figures stop at the swap chain, so the screen itself was read:
 `cadence_watch` (see *Diagnostic tools*) takes every image Windows put on it through the desktop
 duplication, with the time it went there, and `cadence_report.py` says on how many refreshes
-each picture of the film stayed. Fight Club, 4K HDR output on the Panasonic television, the
+each picture of the film stayed. A film, 4K HDR output on the Panasonic television, the
 video processor resizing with Super Resolution and RTX Video HDR, in MPC-HC, two minutes of film
 for each line, on an RTX 4060:
 
@@ -1602,7 +1986,10 @@ is one refresh a picture. A player that switches the screen to the film's rate (
 mode*, 23.976 fps on 23 Hz) gets that.
 
 The duplication itself costs the compositor work: the same film at 23.976 Hz showed a picture
-twice 2 or 3 times in two minutes watched, 3 times in five minutes unwatched.
+twice 2 or 3 times in two minutes watched, 3 times in five minutes unwatched. Those were measured
+with Windows' hardware-accelerated GPU scheduling off; they come from the GPU being held up by a
+service of NVIDIA's, and with the scheduling on there were none in thirteen minutes (see *Known
+limitations*).
 
 ### A video delay, for a sound that arrives late
 
@@ -1701,7 +2088,8 @@ and was not the fault: the pointer stayed exactly as before.
 ## Settings
 
 All the settings are on one page of the renderer's properties, in eight tabs, and are stored
-under `HKCU\Software\MPC-BE Filters\MPC Video Renderer`. Each tab opens on a line saying what it
+under `HKCU\Software\MPC-BE Filters\MPC Video Renderer Plus`, apart from the original
+renderer's (*In MPC-BE and in MPC-HC*). Each tab opens on a line saying what it
 is for, and each control has a tooltip saying what it does, when it applies and what it needs.
 The tables below say the same, with the measurements the tooltips leave out. DLSS needs the
 64-bit filter: in the 32-bit one the **DLSS 5 NR** tab is not there.
@@ -1750,9 +2138,18 @@ One thing resizes the picture: DLSS Super Resolution if it is ticked, the video 
 
 | Setting | Default | What it does |
 |---|---|---|
-| Sharpening: Method | Off | *Adaptive-Sharpen* or *Unsharp + Clamp*, run after the resize, so it also reaches a film already at the screen's size. See *Sharpening* for what each is worth. Needs Direct3D 11 |
-| Intensity | 3 | Five levels, and a level is the same amount of sharpening whichever method is chosen -- +4, +8, +13, +20 and +28 per cent of mean gradient, calibrated through the filter. 3 is where the quality measurements settle. Greyed while Sharpening is Off |
+| Deblocking | Off | Takes out the 8x8 blocks and the ringing of MPEG-2 and XviD-like sources, on the decoded planes before anything converts or resizes the picture. *PP7 (light)* or *SPP (for a powerful GPU)*, which takes the blocks out further and keeps more of the picture for three times the GPU time. See *Deblocking and debanding*. Greyed with RTX Video Super Resolution chosen, and without Direct3D 11 |
+| Strength | 3 | Five levels, each made for one strength of damage, for each method: level 3 for MPEG-2 at quantizer 8. Greyed while Deblocking is Off |
+| Debanding | off | Smooths the steps compression leaves in gradients, on the decoded planes. Same conditions as Deblocking |
+| Strength | 3 | Five levels; see *Deblocking and debanding*. Greyed while Debanding is off |
+| Sharpening: Method | Off | *Adaptive-Sharpen*, *Unsharp + Clamp* or *AMD CAS*, run after the resize, so it also reaches a film already at the screen's size. See *Sharpening* for what each is worth. Needs Direct3D 11 |
+| Intensity | 3 | Five levels, and a level is the same amount of sharpening whichever method is chosen: Adaptive-Sharpen's +4, +8, +13, +20 and +28 per cent of mean gradient, the other two set to give the same, calibrated through the filter. 3 is where the quality measurements settle. Greyed while Sharpening is Off |
 | Use dithering | on | A very fine noise before output, so that skies and fades to black show no banding |
+| Hide the channel logo | off | Hides a TV channel's logo, worked out from under it where it is see-through and filled in from round it where it is opaque, before anything else touches the picture. Each logo found is kept, and recognised on the next films of the same size. See *Hiding a channel's logo*. Stays on with RTX Video Super Resolution; needs Direct3D 11 |
+| Margin | 1 px | The pixels round the logo worked with it, 0 to 3, for an edge the encoder smeared. Greyed while the box is unticked |
+| Find the logo | | Looks for the logo on the film playing and hides it: found in about 15 seconds of the film, hidden from about 30, finished in two minutes. Ticks the box and takes effect at once, with no Apply. The line under it says what it is doing |
+| Forget the logos | | Forgets every logo kept, after asking, and stops hiding the one on screen |
+| Logo | Automatic | The logos kept for pictures the size of the film playing, by their size and where they sit, the last used first. *Automatic*: the one on screen is recognised, or found with *Find the logo*. A logo chosen here is hidden at once on the film playing, with no Apply, and ticks the box |
 
 ### DLSS 5 NR
 
@@ -1845,7 +2242,7 @@ Adaptive-Sharpen on Ctrl+F7 in the last, and presses F7, Ctrl+F7, Ctrl+F6 and F6
 playback: F7 alone and Ctrl+F6 change nothing, the Scaling line follows the other two, and no frame is skipped.
 
 They are stored beside the settings, in `HKCU\Software\MPC-BE Filters\MPC Video
-Renderer\Presets\1` to `\10`, under the same value names as the settings themselves plus
+Renderer Plus\Presets\1` to `\10`, under the same value names as the settings themselves plus
 `Name` and `Key` (the virtual key, plus 0x100 for Shift, 0x200 for Ctrl, 0x400 for Alt), written and read by the same code: a setting added later is in the presets
 without anyone thinking of it.
 
@@ -1893,6 +2290,8 @@ steps work in.
 
 | Step | What it says |
 |---|---|
+| Logo | Hiding a channel's logo: looking for it, with how far along; the logo found, its size and corner, kept from another film or chosen in the list, and whether it is `hidden` or `not on screen` (advertising, a fade). Asked for and not done, it says why: interlaced pictures, an RGB, packed or three-plane source |
+| Artifacts | The deblocking and debanding, their levels, and where the cleaned planes go: `on the planes`, which the conversion or the chroma replacement then reads, or `back into the processor's planes`. Asked for and not done, it says why: RTX Video Super Resolution chosen, interlaced pictures, an RGB or packed source |
 | Chroma | The chroma replacement: the shaders rebuild 4:2:0 or 4:2:2 colour with the Chroma upsampling method and hand the processor a 4:4:4 picture, a prescaler's time included |
 | Processor | The video processor converts the picture, its chroma too unless the step above took it. When it is the one resizing it does that in the same call, the step says `resizes`, and its time is the resizing's too: the Scaling step then has none of its own. RTX Video Super Resolution and RTX Video HDR run inside it and are in its time. The processor works on an engine of its own, which the timestamps around it once missed altogether -- 0.0 ms with Super Resolution and RTX Video HDR at 4K, of 21.6 for the picture; it is now timed from its call to its output being ready, 17.4 ms of 20.8 there |
 | Convert | The shaders convert the picture instead, with the chroma method named, a chroma prescaler's time included |
@@ -1948,20 +2347,31 @@ statistics moves a pixel for every picture drawn.
 Three seconds after the statistics first come up, they also say what the film is made of and
 what the machine is doing. This is **OSD Plus**, by **rampageX** (`github.com/rampageX/MPCVR-Plus`),
 taken into MPCVR-Plus with his thanks. Labels are white and each section's values have a colour
-of their own, kept at the *Subtitle and OSD brightness* over an HDR picture. Fight Club through
-LAV in the bench (`playback_test --file <film> --stats 1`):
+of their own, kept at the *Subtitle and OSD brightness* over an HDR picture.
+
+The whole of the statistics goes out in six calls at most, the labels in one and each section's
+values in one, with spaces where the rest is: every printable ASCII character of Consolas
+advances as a space does. Two calls a line made 64 to 70 a picture, each setting the pipeline
+again. A film in the bench, statistics shown, two runs of each alternated: the render
+thread's drawing a picture went from a median of 0.74 and 0.76 ms to 0.70 and 0.71 without DLSS,
+and from 2.04 to 2.00 with DLSS 5 NR and DLSS SR, about half of what OSD Plus had added. A label
+with any other character keeps a call of its own for its value. `osd_draw_test` (see
+*Diagnostic tools*) requires the same pixels both ways.
+
+The lines OSD Plus adds, a film through LAV in the bench
+(`playback_test --file <film> --stats 1`):
 
     Codec         : AV01
-    Video bitrate : avg 2.39 Mb/s, current 1.96 Mb/s
+    Video bitrate : avg 2.29 Mb/s, current 1.44 Mb/s
     File avg      : 3.02 Mb/s (all streams + container)
     -- Audio -----------------------------------------------------------------------
-    Audio input   : Opus, 48000 Hz, 6 ch, 32-bit, 221 kb/s
+    Audio input   : Opus, 48000 Hz, 6 ch, 32-bit, 211 kb/s
     Audio decoded : Float PCM, 48000 Hz, 6 ch, 32-bit, 9216 kb/s
     Audio render  : Float PCM, 48000 Hz, 6 ch, 32-bit, 9216 kb/s
     -- Hardware --------------------------------------------------------------------
-    CPU           : 3.8% total, 1.8% player
-    GPU           : 22.6% busiest engine, decode 0.0%
-    VRAM (player) : 462 MiB
+    CPU           : 4.9% total, 4.0% player
+    GPU           : 22.8% busiest engine, decode 0.0%
+    VRAM / DRAM   : 462 MiB / 216 MiB (player only)
 
 - *Codec* is the coded format the decoder reads, and *Video bitrate* the video stream's own,
   as the splitter counts it, or as the stream declares it where the splitter does not say.
@@ -1971,9 +2381,15 @@ LAV in the bench (`playback_test --file <film> --stats 1`):
   across a change of track with MPC-BE's audio switcher; where several inputs are connected and
   none says which one plays, it does not guess. A depth the stream does not declare stays N/A.
 - *Hardware* is sampled once a second on a thread of its own: the CPU, the player's share of it,
-  the busiest engine of the GPU the picture is rendered on and its video decoder, and the video
-  memory the player uses. The sampling pauses while the statistics are hidden, and starts again
-  three seconds after a new film, so that opening one is not slowed by it.
+  the busiest engine of the GPU the picture is rendered on and its video decoder, and the memory
+  the player uses, its own and no other program's. *VRAM* is what it holds in the GPU's memory,
+  as DXGI counts it. *DRAM* is its private working set, the figure of Task Manager's *Memory*
+  column: the pages in RAM that are the player's alone, without the DLLs it shares with other
+  programs and without what Windows has paged out. In the bench it read 216 and 397 MiB where
+  Windows' own counter of the same (`Win32_PerfFormattedData_PerfProc_Process`) read 215-216
+  and 395-396, without DLSS and with DLSS 5 NR and DLSS SR. A Windows that does not give that
+  figure shows N/A. The sampling pauses while the statistics are hidden, and starts again three
+  seconds after a new film, so that opening one is not slowed by it.
 
 ---
 
@@ -1994,6 +2410,31 @@ at 2160p, plus what the Optical Flow engine allocates.
 **Cost.** Two CPU stalls per frame for the cross-device synchronisation, plus the network
 itself and the stabilizer. Fine for video framerates; this is not a low-latency design. Render
 ahead keeps pictures on time as long as a picture takes less than about a frame.
+
+**With RTX Video Super Resolution or DLSS SR on an NVIDIA card, turn on Windows'
+hardware-accelerated GPU scheduling** (Settings, System, Display, Graphics, the default
+graphics settings; it takes a restart). Without it a picture is shown twice now and then and
+the next one never, a jolt the sync offset graph shows as a spike. NVIDIA's display service
+(`NVDisplay.Container.exe`) has a thread, started in `_nvtopps.dll`, that wakes about once a
+second and works some 3 ms. While an AI upscaler runs it works 10 to 50 ms now and then, and
+for as long the driver reports no GPU work done and Windows' scheduler sends none: the
+compositor's flip waits behind it, and one that goes more than about 40 ms after the vertical
+blank loses the refresh. Every hold-up fell on that thread's period, 1.006 s; without an AI
+upscaler its turns never passed 3.5 ms and nothing was held up. Hardware decoding, the
+statistics and the film's cuts had nothing to do with it. A film from 15:27 to 21:27 at
+23.976 Hz in MPC-HC 2.8.4, 4K HDR, the video processor resizing with RTX Video Super
+Resolution and RTX Video HDR, RTX 4060 (driver 32.0.16.1742), traced with ETW (xperf: the GPU
+scheduler, the compositor, DXGI, thread switches) beside the pacing trace:
+
+| GPU scheduling | GPU held up 8 ms or more | the compositor's flip, after the blank | pictures shown twice |
+|---|---|---|---|
+| hardware-accelerated off, 7 runs of 6.5 min | 5 to 11 a run (none in one), up to 41 ms | median 8 ms; at worst 32 to 41 ms in six runs | 4 in all, 0 to 2 a run |
+| **hardware-accelerated on**, 2 runs of 6.5 min | **none** | **median 1.5 ms, at worst 5.3** | **none** |
+
+NVIDIA's thread was just as slow with the scheduling on, up to 49.9 ms; it no longer holds the
+GPU up. Going round the compositor is no way out: with RTX Video Super Resolution Windows
+composes every picture of the swap chain whatever its window, where without it the same swap
+chain goes on an overlay plane of its own, and the hold-up stops the whole GPU anyway.
 
 **Settings change while the film plays.** They all take effect on the picture that follows,
 with no restart: the formats the processor may take, RTX Video HDR, Super Resolution, the
@@ -2111,6 +2552,15 @@ picture, which is what used to show a green frame when DLSS was toggled while pa
 replacement, for each source format and each chroma method, since a compute shader has rules a
 pixel shader has not. One that does not compile leaves the picture to the video processor
 without a word, so nothing on screen says it happened.
+
+**`osd_audio_test.exe` and `osd_draw_test.exe`** — the statistics' own checks. The first takes
+rampageX's cases for which audio input the statistics follow and the bit depth they show. The
+second draws the statistics with the filter's own font and `COsdPlusText`, in one call a colour,
+and the way they were drawn before, two calls a line, at eleven font sizes from 14 to 48 points,
+on 8-bit, 10-bit and half-float pictures, in SDR and in PQ at the three OSD brightnesses, with
+characters outside ASCII and a line longer than the font draws in one go: it requires the same
+bytes every time, and that every printable ASCII character advances as a space does, which is
+what the one call a colour stands on.
 
 **`vp444_probe.exe`** — asks the driver, through the renderer's own `CD3D11VP`, what the
 video processor really does with each input format: which it takes, how its conversion
@@ -2268,6 +2718,7 @@ mpchc_drive.exe --attach 40     watch a running MPC-HC: windows made or lost, po
 dlssnr_harness.exe --tdownscale  what each downscaler keeps and what it lets fold back
 dlssnr_harness.exe --tdownport   and that those shaders are the kernels they are written from
 playback_test.exe --scalers --size 1920x1038 --window 2496x1349   every upscaler at a small ratio
+playback_test.exe --sharpencal --file <film> --window 3200x1334 --vpscale 0 --calup 5   each sharpener's gain in detail against its strength, and its levels read back
 playback_test.exe --scalers --size 3836x2160 --window 3840x2160 --small 5   the stand-in under 5 %
 playback_test.exe --dlaa --size 1920x1080 --window 1920x1080   DLSS SR with nothing to enlarge
 playback_test.exe --mainpage 10 --hover 1042   the tip that comes up on a control, greyed or not
@@ -2277,6 +2728,15 @@ playback_test.exe --frame 10      the page in a real property frame, as a player
 playback_test.exe --frame 10 --themed   and with a player painting its controls over it
 playback_test.exe --chroma <png>  each chroma upsampler, the hardware one included, against 4:4:4
 playback_test.exe --chroma10 <png> the same in 10 bits: P010 against Y410 (--interlaced: who converts)
+playback_test.exe --clean <png>   the picture coded as MPEG-2 intra blocks, deblocked by each path (--clean10: P010)
+playback_test.exe --file <film> --deblock 3 --deband 2   a real film with the artifact removal at those levels (--spp: SPP)
+dlssnr_harness.exe --tclean       deblocking and debanding at their five levels, and their shaders against the reference
+dlssnr_harness.exe --tclean --study   the comparison the methods were chosen on (--ladder, --cost, --withnr: parts of it)
+python clean_refs.py              real encodes and FFmpeg's filters on them, then --tclean --files clean_refs and --cambi
+dlssnr_harness.exe --tlogo        six logos laid over a film, found, fitted and taken out; the shaders against the reference
+dlssnr_harness.exe --tlogo --study   the comparison the hiding was made on, every logo through x264 too
+dlssnr_harness.exe --tlogo --real --film <film>   the analysis on a real recording: logo_*.png of what it found and did
+playback_test.exe --logo --file <film>   Find the logo pressed on a real film, through each path, then the list of logos kept tried; logo_*_hidden.bmp, _shown.bmp
 playback_test.exe --toggle       each setting changed in full playback, as the player does
 playback_test.exe --toggle --gpu --hdr --switch   as a hardware decoder feeds it, in HDR
 playback_test.exe --toggle --file <mkv> --seek 1740   a real film, split and decoded
@@ -2351,8 +2811,25 @@ everything that runs them is part of this fork and GPLv3 like the rest.
 The **Adaptive-Sharpen** pass in `Shaders/d3d11/ps_sharpen.hlsl` is translated from
 **bacondither**'s mpv shader, version 2021-10-17 (`github.com/bacondither/Adaptive-sharpen`),
 Copyright (c) 2015-2021 bacondither, under the **BSD 2-clause** licence; its notice travels
-with the pass. The three-line contrast-adaptive kernel measured beside it comes from AMD's
-FidelityFX (MIT) and is not shipped.
+with the pass. The **AMD CAS** pass beside it is AMD FidelityFX Contrast Adaptive Sharpening,
+Copyright (c) Advanced Micro Devices, Inc., under the **MIT** licence, its algorithm written
+again for this pass.
+
+The **debanding** in `Shaders/d3d11/cs_deband.hlsl` is a translation of **libplacebo**'s
+`pl_shader_deband` (v7.351.0, `code.videolan.org/videolan/libplacebo`), Copyright its authors,
+under the **GNU Lesser General Public License 2.1 or later**, which allows it to be offered
+under the GPL as the rest of the renderer; its notice travels with the pass. The **deblocking**
+in `Shaders/d3d11/cs_deblock.hlsl` follows FFmpeg's `pp7` filter and, for SPP, the grid table
+of its `spp` filter (both MPlayer's, by Michael Niedermayer, GPL 2 or later).
+
+**Hiding a channel's logo** (`Source/Logo/`, `Shaders/d3d11/cs_logo_*.hlsl`) is written for
+this renderer from published descriptions, with no code taken: the blending model and the
+per-pixel fit are those of AviUtl's **delogo** filter and its **logoscan** analyser, by MakKi
+(`github.com/makiuchi-d/delogo-aviutl`); the edge share that finds the logo and the test of a
+picture without it, those of **LogoScan** (`github.com/DeepRegular/LogoScan`); time-averaged
+edges after Özay and Sankur (EUSIPCO 2009) and the iterative refinement after Erofeev et al.
+(GraphiCon 2011); the fill is Gortler et al.'s push-pull. FFmpeg's `removelogo` and `delogo`
+were the anchors it was measured against.
 
 `Source/DLSS/NvOF/` holds the two interface headers of the NVIDIA Optical Flow SDK 5.0.7,
 copied unchanged. Each carries its own permission notice ("This copyright notice applies to

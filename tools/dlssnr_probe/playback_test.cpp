@@ -38,6 +38,10 @@
 //                                     --measurepeak 0|1, --dovitm 0|6, --sdrtm 0..2 (Fixed, Metadata,
 //                                     Measured), --tosdr 0|1, --prefdovi 0|1: upstream 0.11's HDR settings
 //                                     which processor then converts the picture
+//   playback_test.exe --clean <png>     the artifact removal: the picture's planes coded as MPEG-2 intra
+//                                     blocks, fed in NV12, cleaned by each path that converts it;
+//                                     --clean10 the same in P010. --file <film> --deblock N --deband N
+//                                     plays a film with the artifact removal at those levels (0 off)
 
 #include <windows.h>
 #include <VersionHelpers.h>
@@ -56,6 +60,7 @@
 #include <vector>
 #include <atomic>
 #include <commctrl.h>
+#include <shlobj.h>
 #include "../../Source/SettingsPage/Greying.h"
 #include <map>
 #include <thread>
@@ -63,12 +68,14 @@
 #include "IVideoRenderer.h"
 #include "../../Include/ID3DVideoMemoryConfiguration.h"
 #include "../../Include/FilterInterfaces.h"
+#include "mpeg2_intra.inl"
 
 #pragma comment(lib, "strmiids.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "advapi32.lib")
 
@@ -86,6 +93,19 @@ static bool g_bHardwareVP = false; // --vp: leave the video processor the format
 // chroma upsampler rebuilds -- the hardware video processor included.
 static bool g_bChroma = false;
 static bool g_bChroma444 = false;      // this run feeds AYUV, the reference
+// --clean: the same machinery, the 4:2:0 picture's planes coded as MPEG-2 intra blocks at
+// this quantiser_scale_code first, and each run asking for its own artifact removal.
+static bool g_bClean = false;
+// --sharpencal --file <film>: each sharpening method at a run of strengths, set through
+// MPCVR_SHARPEN_STRENGTH, the displayed picture's mean luma gradient against the same
+// picture unsharpened, and the strength that gives each level's gain (+4, +8, +13, +20 and
+// +28 %). --calup N: the Upscaling method it is read under (UPSCALE_*), else the registry's.
+static bool g_bSharpenCal = false;
+static int g_calUpscaling = -1;
+static constexpr int kCleanQ = 8;
+static int g_filmDeblock = -1;         // --file: --deblock N, 0 off
+static int g_filmDeblockMethod = DEBLOCK_PP7;   // --file: --spp, the heavier method
+static int g_filmDeband = -1;          // --file: --deband N, 0 off
 static bool g_bToggle = false;         // --toggle: settings changed while the film plays
 static bool g_bToggleHdr = false;      // --toggle --hdr: with HDR passthrough, the case that freezes
 static bool g_bToggleHdrOff = false;   // --toggle --hdroff --file <HDR film>: HDR output off while it plays
@@ -112,8 +132,9 @@ static int g_filmToSdr = -1;      // --tosdr 0|1
 static int g_filmPreferDovi = -1; // --prefdovi 0|1
 // --asis: leave the settings exactly as the registry has them. The only way to drive a
 // renderer this bench did not build: Settings_t has grown fields since, so SetSettings
-// on the stock filter writes a layout it does not know and it ignores the lot. Both
-// renderers read the same key, so the registry is the common ground.
+// on the stock filter writes a layout it does not know and it ignores the lot. Each
+// renderer then plays what its own key says: the stock one the original's, this one
+// ...\MPC Video Renderer Plus, copied from the original's the first time it has none.
 static bool g_bAsIs = false;
 static bool g_bToggleGpu = false;      // --toggle --gpu: the pictures arrive as D3D11 textures, as from a hardware decoder
 static bool g_bToggleTap = false;      // --toggle --tap: pause and play tapped, nothing else -- the reported freeze
@@ -124,6 +145,7 @@ static bool g_bThemedHost = false;     // --themed: and a player that paints it
 static bool g_bDlaa = false;           // --dlaa: let DLSS SR run without enlarging
 static bool g_bAfterNR = false;        // --afternr: who enlarges what DLSS 5 NR leaves, on a real film (--file)
 static bool g_bVPTurns = false;        // --vpturns: who enlarges, without DLSS, the desktop read unclipped (--file)
+static bool g_bLogo = false;           // --logo: the channel's logo found and hidden on a real film (--file)
 static int g_smallUpscaling = -1;      // --small N: another method under 5 %
 static int g_videoDelay = 0;           // --delay N: every picture N ms after its time (the Video delay setting)
 static int g_videoDelayTo = INT_MIN;   // --delayto N: and changed to N three seconds in, as the page's slider does
@@ -402,6 +424,52 @@ public:
 		}
 	}
 
+	// --clean: the 4:2:0 sample just written, its three planes coded as MPEG-2 intra
+	// blocks (mpeg2_intra.inl), made once and kept: the same picture every time.
+	void DegradeSample(BYTE* p)
+	{
+		static std::vector<BYTE> made;
+		const size_t size = (size_t)SampleSize();
+		if (made.size() != size) {
+			const int w = m_width, h = m_height, cw = w / 2, ch = h / 2;
+			const bool b10 = g_bChroma10;
+			const int levels = b10 ? 1023 : 255;
+			auto get = [&](size_t i) { return b10 ? (((const UINT16*)p)[i] >> 6) / 1023.0f : p[i] / 255.0f; };
+			std::vector<float> y((size_t)w * h), cb((size_t)cw * ch), cr((size_t)cw * ch);
+			for (size_t i = 0; i < y.size(); i++) {
+				y[i] = get(i);
+			}
+			for (int j = 0; j < ch; j++) {
+				for (int i = 0; i < cw; i++) {
+					cb[(size_t)j * cw + i] = get((size_t)w * h + (size_t)j * w + 2 * i);
+					cr[(size_t)j * cw + i] = get((size_t)w * h + (size_t)j * w + 2 * i + 1);
+				}
+			}
+			Mpeg2Intra(y, w, h, kCleanQ, 0, 0, levels);
+			Mpeg2Intra(cb, cw, ch, kCleanQ, 0, 0, levels);
+			Mpeg2Intra(cr, cw, ch, kCleanQ, 0, 0, levels);
+			made.assign(p, p + size);
+			auto put = [&](size_t i, float v) {
+				const UINT code = (UINT)std::lround(std::clamp(v, 0.0f, 1.0f) * levels);
+				if (b10) {
+					((UINT16*)made.data())[i] = (UINT16)(code << 6);
+				} else {
+					made[i] = (BYTE)code;
+				}
+			};
+			for (size_t i = 0; i < y.size(); i++) {
+				put(i, y[i]);
+			}
+			for (int j = 0; j < ch; j++) {
+				for (int i = 0; i < cw; i++) {
+					put((size_t)w * h + (size_t)j * w + 2 * i, cb[(size_t)j * cw + i]);
+					put((size_t)w * h + (size_t)j * w + 2 * i + 1, cr[(size_t)j * cw + i]);
+				}
+			}
+		}
+		memcpy(p, made.data(), size);
+	}
+
 	HRESULT FillBuffer(IMediaSample* pSample) override
 	{
 		BYTE* p = nullptr;
@@ -410,6 +478,9 @@ public:
 		}
 		if (g_bChroma) {
 			WriteChromaSample(p);
+			if (g_bClean && !g_bChroma444) {
+				DegradeSample(p);
+			}
 			REFERENCE_TIME start = m_frame * g_frameDuration;
 			REFERENCE_TIME end = start + g_frameDuration;
 			pSample->SetTime(&start, &end);
@@ -555,6 +626,122 @@ static void Pump(DWORD ms)
 			return;
 		}
 		MsgWaitForMultipleObjects(0, nullptr, FALSE, (DWORD)std::min<ULONGLONG>(end - now, 10), QS_ALLINPUT);
+	}
+}
+
+// What hiding the channel's logo is doing, as the settings page shows it.
+static std::wstring LogoStatus(IBaseFilter* pRenderer)
+{
+	std::wstring text;
+	if (CComQIPtr<IExFilterConfig> pConfig{ pRenderer }) {
+		LPWSTR pstr = nullptr;
+		if (S_OK == pConfig->Flt_GetString("logoStatus", &pstr, nullptr) && pstr) {
+			text = pstr;
+			CoTaskMemFree(pstr);
+		}
+	}
+	return text;
+}
+
+// The settings page's list of the logos kept for the film playing, one a line.
+static int LogoListed(IBaseFilter* pRenderer)
+{
+	int n = 0;
+	if (CComQIPtr<IExFilterConfig> pConfig{ pRenderer }) {
+		LPWSTR pstr = nullptr;
+		if (S_OK == pConfig->Flt_GetString("logoList", &pstr, nullptr) && pstr) {
+			for (const wchar_t* c = pstr; *c; c++) {
+				n += *c == L'\n';
+			}
+			CoTaskMemFree(pstr);
+		}
+	}
+	return n;
+}
+
+// The logos the filter keeps, which a test leaves as it found them.
+static std::wstring LogoFolder()
+{
+	wchar_t base[MAX_PATH] = {};
+	if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, base))) {
+		return {};
+	}
+	return std::wstring(base) + L"\\MPC-BE Filters\\MPC Video Renderer\\logos\\";
+}
+
+static std::vector<std::wstring> LogoFiles()
+{
+	std::vector<std::wstring> out;
+	const std::wstring dir = LogoFolder();
+	WIN32_FIND_DATAW fd = {};
+	HANDLE h = FindFirstFileW((dir + L"*.logo").c_str(), &fd);
+	if (h != INVALID_HANDLE_VALUE) {
+		do {
+			out.push_back(dir + fd.cFileName);
+		} while (FindNextFileW(h, &fd));
+		FindClose(h);
+	}
+	return out;
+}
+
+// A logo the library holds, as a test found it: its bytes, for one the filter lets go when a
+// logo the test found makes one too many, and when it was last used, which the recognition
+// and the settings page's list go by.
+struct KeptLogo {
+	std::wstring path;
+	std::vector<char> bytes;
+	FILETIME used = {};
+};
+
+static std::vector<KeptLogo> SaveLogos()
+{
+	std::vector<KeptLogo> out;
+	for (const std::wstring& f : LogoFiles()) {
+		HANDLE h = CreateFileW(f.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+		if (h == INVALID_HANDLE_VALUE) {
+			continue;
+		}
+		KeptLogo k;
+		k.path = f;
+		LARGE_INTEGER size = {};
+		DWORD got = 0;
+		if (GetFileSizeEx(h, &size) && size.QuadPart > 0 && size.QuadPart < (64 << 20)) {
+			k.bytes.resize((size_t)size.QuadPart);
+			if (!ReadFile(h, k.bytes.data(), (DWORD)k.bytes.size(), &got, nullptr) || got != k.bytes.size()) {
+				k.bytes.clear();
+			}
+		}
+		GetFileTime(h, nullptr, nullptr, &k.used);
+		CloseHandle(h);
+		out.push_back(std::move(k));
+	}
+	return out;
+}
+
+// What a run put into the library goes again, what it took out comes back, and each logo is
+// as recently used as it was.
+static void PutLogosBack(const std::vector<KeptLogo>& before)
+{
+	for (const std::wstring& f : LogoFiles()) {
+		if (std::none_of(before.begin(), before.end(), [&](const KeptLogo& k) { return k.path == f; })) {
+			DeleteFileW(f.c_str());
+		}
+	}
+	for (const KeptLogo& k : before) {
+		HANDLE h = CreateFileW(k.path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+		if (h == INVALID_HANDLE_VALUE && !k.bytes.empty()) {
+			h = CreateFileW(k.path.c_str(), GENERIC_WRITE | FILE_WRITE_ATTRIBUTES, 0, nullptr, CREATE_NEW, 0, nullptr);
+			DWORD put = 0;
+			if (h != INVALID_HANDLE_VALUE && !WriteFile(h, k.bytes.data(), (DWORD)k.bytes.size(), &put, nullptr)) {
+				CloseHandle(h);
+				DeleteFileW(k.path.c_str());
+				h = INVALID_HANDLE_VALUE;
+			}
+		}
+		if (h != INVALID_HANDLE_VALUE) {
+			SetFileTime(h, nullptr, nullptr, &k.used);
+			CloseHandle(h);
+		}
 	}
 }
 
@@ -742,9 +929,22 @@ struct Config {
 	int iVPScale = -1;           // --afternr: "Use the video processor for resizing", 0 or 1
 	int iSuperRes = -1;          // and Request Super Resolution, SUPERRES_*
 	int iPrepass = -1;           // and "Replace VP chroma upsampling", 0 or 1
+	int iDeblock = 0;            // --clean: the deblocking level, 0 off
+	int iDeband = 0;             // and the debanding's
+	int iDeblockMethod = DEBLOCK_PP7; // and the deblocking's method
+	int iSharpen = -1;              // --sharpencal: SHARPEN_*, -1 the saved setting
+	float fSharpenStrength = 0;     // and the strength it is given instead of its level's, 0: none
+	int iSharpenLevel = SHARPEN_LEVEL_DEF;  // the level, when no strength replaces it
 };
 
 struct Result {
+	std::vector<BYTE> logoShown;   // --logo: the same picture with the logo left on
+	std::wstring logoStatus, logoStep;
+	double logoMs = -1;
+	double logoHiddenAt = -1, logoFoundAt = -1;   // seconds after Find was pressed
+	int logoListed = -1;                          // the logos the page's list holds
+	std::wstring logoChosen, logoBack;            // the first of them chosen, then Automatic again
+	int logoChoiceRead = -1;                      // what the filter says is chosen, after choosing
 	bool bRan = false;
 	std::wstring screenLine;   // what the desktop itself held, read past the renderer
 	std::vector<BYTE> screenCrop;  // and the picture that reading was taken from
@@ -1087,6 +1287,54 @@ static int ShowGreying()
 		? "DLSS 5 NR has to leave every line as it is without it, and DLSS SR has to grey\n"
 		  "Upscaling and Super Resolution and leave Downscaling live."
 		: "DLSS 5 NR changes no line, and DLSS SR takes the enlarging.");
+
+	// The artifact removal: RTX Video Super Resolution cleans the picture itself, so
+	// the two boxes step aside when it is chosen and able to run, and only then. The
+	// renderer asks the same function (CDX11VideoProcessor::CleaningAllowed).
+	printf("\nthe artifact removal, against RTX Video Super Resolution\n\n");
+	printf("%-10s %-9s %-8s %-9s %-9s %-9s\n", "superres", "resizing", "prepass", "superres", "cleaning", "logo");
+	int wrongClean = 0;
+	for (const bool bVsr : { false, true }) {
+		for (const bool bResizing : { true, false }) {
+			for (const bool bPrepass : { false, true }) {
+				Settings_t sets;
+				sets.bUseD3D11 = true;
+				sets.bVPScaling = bResizing;
+				sets.VPFmts.bNV12 = sets.VPFmts.bP01x = sets.VPFmts.bYUY2 = sets.VPFmts.bOther = true;
+				sets.bDlssNR = sets.bDlssSR = false;
+				sets.bVPReplaceChroma = bPrepass;
+				sets.iVPSuperRes = bVsr ? SUPERRES_1080p : SUPERRES_Disable;
+				const Greying g = GreyingFor(sets, true, true, false);
+				const bool bExpected = !(bVsr && bResizing && !bPrepass);
+				// Hiding the logo stays live whatever Super Resolution does: it does not hide logos.
+				const bool bWrong = g.bCleaning != bExpected || !g.bLogo;
+				wrongClean += bWrong;
+				printf("%-10s %-9s %-8s %-9s %-9s %-9s%s\n",
+					(bResizing && !bPrepass) ? (bVsr ? "chosen" : "off") : "",
+					bResizing ? "ticked" : "off",
+					bPrepass ? "on" : "off",
+					g.bSuperRes ? "live" : "GREYED",
+					g.bCleaning ? "live" : "GREYED",
+					g.bLogo ? "live" : "GREYED",
+					bWrong ? "   <-- WRONG" : "");
+			}
+		}
+	}
+	{
+		Settings_t sets;
+		sets.bUseD3D11 = false;
+		const Greying g = GreyingFor(sets, true, true, false);
+		const bool bWrong = g.bCleaning || g.bLogo;
+		wrongClean += bWrong;
+		printf("%-10s Direct3D 9: cleaning %s, logo %s%s\n", "", g.bCleaning ? "live" : "GREYED", g.bLogo ? "live" : "GREYED",
+			bWrong ? "   <-- WRONG" : "");
+	}
+	printf("\n%s\n", wrongClean
+		? "The cleaning has to grey where Super Resolution is chosen and live, and nowhere else; the\n"
+		  "logo's hiding only under Direct3D 9."
+		: "The cleaning steps aside for Super Resolution chosen and live, and for nothing else; the\n"
+		  "logo's hiding stays live with it.");
+	wrong += wrongClean;
 	printf("%d failure(s)\n", wrong);
 	return wrong ? 1 : 0;
 }
@@ -1204,6 +1452,15 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 	if (config.iChromaScaling >= 0) {
 		sets.iChromaScaling = config.iChromaScaling;
 	}
+	if (config.iSharpen >= 0) {
+		// The filter reads the strength from its environment as it sets the sharpening up,
+		// and this process is its environment.
+		wchar_t value[32] = {};
+		swprintf_s(value, L"%.4f", config.fSharpenStrength);
+		SetEnvironmentVariableW(L"MPCVR_SHARPEN_STRENGTH", config.fSharpenStrength > 0 ? value : nullptr);
+		sets.iSharpen = config.iSharpen;
+		sets.iSharpenLevel = config.iSharpenLevel;
+	}
 	if (g_bChroma) {
 		// Nothing but the chroma upsampling changes between the runs: the picture is
 		// shown at its own size, the dither would add noise of its own, and the
@@ -1221,6 +1478,22 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		}
 		if (config.iRtxHdr >= 0) {
 			sets.bVPRTXVideoHDR = config.iRtxHdr != 0;
+		}
+		// --clean: each run its own artifact removal, and none in the --chroma runs,
+		// whatever the registry holds. Super Resolution asked for needs the processor
+		// to be the one resizing: at 1:1 it then has nothing to do, and the cleaning
+		// is still to step aside for it.
+		sets.iDeblock = config.iDeblock > 0 ? config.iDeblockMethod : DEBLOCK_Off;
+		sets.bDeband = config.iDeband > 0;
+		if (config.iDeblock > 0) {
+			sets.iDeblockLevel = config.iDeblock;
+		}
+		if (config.iDeband > 0) {
+			sets.iDebandLevel = config.iDeband;
+		}
+		if (config.iSuperRes >= 0) {
+			sets.bVPScaling = true;
+			sets.iVPSuperRes = config.iSuperRes;
 		}
 	}
 	if (g_filmFile) {
@@ -1268,12 +1541,27 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		if (g_filmPreferDovi >= 0) {
 			sets.bHdrPreferDoVi = g_filmPreferDovi != 0;
 		}
+		if (g_filmDeblock >= 0) {
+			sets.iDeblock = g_filmDeblock > 0 ? g_filmDeblockMethod : DEBLOCK_Off;
+			if (g_filmDeblock > 0) {
+				sets.iDeblockLevel = g_filmDeblock;
+			}
+		}
+		if (g_filmDeband >= 0) {
+			sets.bDeband = g_filmDeband > 0;
+			if (g_filmDeband > 0) {
+				sets.iDebandLevel = g_filmDeband;
+			}
+		}
 		// --afternr: who resizes is each run's own business.
 		if (config.iVPScale >= 0) {
 			sets.bVPScaling = config.iVPScale != 0;
 		}
 		if (config.iSuperRes >= 0) {
 			sets.iVPSuperRes = config.iSuperRes;
+		}
+		if (g_bLogo) {
+			sets.bHideLogo = true;
 		}
 		if (config.iPrepass >= 0) {
 			sets.bVPReplaceChroma = config.iPrepass != 0;
@@ -1302,6 +1590,12 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 				(int)back.bHdrPassthrough, (int)back.bHdrLocalToneMapping, back.iHdrLocalToneMappingType,
 				(int)back.bHdrLocalMeasurePeak, back.iHdrDoviToneMappingType, (int)back.bConvertToSdr,
 				back.iSdrToneMappingType, (int)back.bHdrPreferDoVi);
+		}
+		// The artifact removal, the last four fields of Settings_t: a build whose
+		// structure differs from the bench's shows it here first.
+		if (g_filmDeblock >= 0 || g_filmDeband >= 0) {
+			printf("   clean kept   : deblock %d level %d, deband %d level %d\n",
+				back.iDeblock, back.iDeblockLevel, (int)back.bDeband, back.iDebandLevel);
 		}
 	}
 	}
@@ -1367,8 +1661,29 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 	ParseSkipped(text, result.framesAtStart, result.skippedAtStart);
 	result.lateAtStart = ParseLate(text);
 
+	// --logo: the analysis started as the button starts it.
+	std::wstring lastLogo;
+	if (g_bLogo) {
+		if (CComQIPtr<IExFilterConfig> pConfig{ pRenderer.p }) {
+			pConfig->Flt_SetBool("cmd_findLogo", true);
+		}
+	}
+
 	for (int i = 0; i < seconds * 10; i++) {
 		Pump(100);
+		if (g_bLogo && i % 5 == 4) {
+			const std::wstring now = LogoStatus(pRenderer);
+			if (now != lastLogo) {
+				printf("   %5.1f s  logo: %S\n", (i + 1) / 10.0, now.c_str());
+				lastLogo = now;
+			}
+			if (result.logoHiddenAt < 0 && now.find(L"hidden") != std::wstring::npos) {
+				result.logoHiddenAt = (i + 1) / 10.0;
+			}
+			if (result.logoFoundAt < 0 && now.find(L" found, hidden") != std::wstring::npos) {
+				result.logoFoundAt = (i + 1) / 10.0;
+			}
+		}
 		text = StatsText(pRenderer);
 		const std::wstring sync = StatsLine(text, L"Sync offset   : ");
 		// Shown to a tenth now, counted to the millisecond as the report always has.
@@ -1512,6 +1827,28 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 			}
 		}
 	}
+	if (g_bLogo && result.logoFoundAt >= 0) {
+		// The list on the settings page: the logo just found is in it; chosen there it is
+		// hidden at once, and Automatic gives it back to the recognition, as the page does.
+		if (CComQIPtr<IExFilterConfig> pConfig{ pRenderer.p }) {
+			result.logoListed = LogoListed(pRenderer);
+			if (result.logoListed > 0) {
+				pConfig->Flt_SetInt("logoChoice", 1);
+				for (int i = 0; i < 30 && result.logoChosen.find(L"hidden") == std::wstring::npos; i++) {
+					Pump(100);
+					result.logoChosen = LogoStatus(pRenderer);
+				}
+				pConfig->Flt_GetInt("logoChoice", &result.logoChoiceRead);
+				pConfig->Flt_SetInt("logoChoice", 0);
+				for (int i = 0; i < 150 && result.logoBack.find(L"hidden") == std::wstring::npos; i++) {
+					Pump(100);
+					result.logoBack = LogoStatus(pRenderer);
+				}
+				printf("   list: %d kept; chosen: %S; automatic again: %S\n", result.logoListed,
+					result.logoChosen.c_str(), result.logoBack.c_str());
+			}
+		}
+	}
 	if (g_filmFile && watch.Ready()) {
 		// The desktop shows whatever is in front: a window left behind another one
 		// is not what the duplication composes, and the reading would be of the
@@ -1589,6 +1926,24 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 			}
 			previous = result.picture;
 			Pump(250);
+		}
+		if (g_bLogo) {
+			// The same picture with the logo left on, to set beside it.
+			result.logoStatus = LogoStatus(pRenderer);
+			result.logoStep = StepLine(text, L"Logo", &result.logoMs);
+			sets.bHideLogo = false;
+			pVR->SetSettings(sets);
+			Pump(800);
+			previous.clear();
+			int w = 0, h = 0;
+			for (int attempt = 0; attempt < 8; attempt++) {
+				GrabDisplayed(pRenderer, result.logoShown, w, h);
+				if (!result.logoShown.empty() && result.logoShown == previous) {
+					break;
+				}
+				previous = result.logoShown;
+				Pump(250);
+			}
 		}
 	}
 	if ((g_bAfterNR || g_bVPTurns) && watch.Ready()) {
@@ -2223,6 +2578,71 @@ static int ShowPropertyPage(HMODULE hFilter, HWND hwnd, int seconds, REFCLSID cl
 	return 0;
 }
 
+// --clean: the displayed picture's luma against the clean picture's, and how much of the
+// codec's grid is left in it: the steps across the 8-pixel grid against the steps
+// elsewhere, both ways, as dlssnr_harness --tclean has it (1.00: no blocks at all).
+struct CleanMetrics {
+	double psnr = 0;
+	double block = 0;
+};
+
+// The mean length of the luma's gradient over the picture, central differences, the frame's
+// two outer pixels left out: what a sharpener raises, the measure its levels are set on.
+static double MeanLumaGradient(const std::vector<BYTE>& bgra, int w, int h)
+{
+	if (w < 5 || h < 5 || bgra.size() < (size_t)w * h * 4) {
+		return 0;
+	}
+	std::vector<float> y((size_t)w * h);
+	for (size_t i = 0; i < y.size(); i++) {
+		const BYTE* p = &bgra[i * 4];
+		y[i] = (0.0722f * p[0] + 0.7152f * p[1] + 0.2126f * p[2]) / 255.0f;
+	}
+	double sum = 0;
+	for (int yy = 2; yy < h - 2; yy++) {
+		for (int x = 2; x < w - 2; x++) {
+			const size_t i = (size_t)yy * w + x;
+			const double gx = 0.5 * (y[i + 1] - y[i - 1]);
+			const double gy = 0.5 * (y[i + w] - y[i - w]);
+			sum += std::sqrt(gx * gx + gy * gy);
+		}
+	}
+	return sum / ((double)(w - 4) * (h - 4));
+}
+
+static CleanMetrics ScoreClean(const std::vector<BYTE>& test, const std::vector<BYTE>& ref, int w, int h)
+{
+	auto luma = [](const BYTE* p) { return (0.2126 * p[2] + 0.7152 * p[1] + 0.0722 * p[0]) / 255.0; };
+	std::vector<double> y((size_t)w * h);
+	double se = 0;
+	for (size_t i = 0; i < y.size(); i++) {
+		y[i] = luma(&test[4 * i]);
+		const double d = y[i] - luma(&ref[4 * i]);
+		se += d * d;
+	}
+	CleanMetrics m;
+	m.psnr = se > 0 ? 10.0 * std::log10(y.size() / se) : 99.0;
+	double on[2] = {}, off[2] = {};
+	long long nOn[2] = {}, nOff[2] = {};
+	for (int j = 0; j < h; j++) {
+		for (int i = 0; i < w; i++) {
+			const double v = y[(size_t)j * w + i];
+			if (i > 0) {
+				const double s = std::abs(v - y[(size_t)j * w + i - 1]);
+				if ((i & 7) == 0) { on[0] += s; nOn[0]++; } else { off[0] += s; nOff[0]++; }
+			}
+			if (j > 0) {
+				const double s = std::abs(v - y[(size_t)(j - 1) * w + i]);
+				if ((j & 7) == 0) { on[1] += s; nOn[1]++; } else { off[1] += s; nOff[1]++; }
+			}
+		}
+	}
+	for (int k = 0; k < 2; k++) {
+		m.block += (nOn[k] && nOff[k] && off[k] > 0) ? 0.5 * (on[k] / nOn[k]) / (off[k] / nOff[k]) : 0;
+	}
+	return m;
+}
+
 // What one displayed picture keeps of the 4:4:4 one, chroma first: the luma is the
 // same in both, so what differs is what the upsampler made of Cb and Cr.
 struct ChromaMetrics {
@@ -2365,10 +2785,24 @@ int wmain(int argc, wchar_t* argv[])
 			g_filmToSdr = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--prefdovi")) {
 			g_filmPreferDovi = _wtoi(argv[i + 1]);
-		} else if (!wcscmp(argv[i], L"--chroma") || !wcscmp(argv[i], L"--chroma10")) {
+		} else if (!wcscmp(argv[i], L"--chroma") || !wcscmp(argv[i], L"--chroma10")
+				|| !wcscmp(argv[i], L"--clean") || !wcscmp(argv[i], L"--clean10")) {
 			g_bChroma = true;
-			g_bChroma10 = !wcscmp(argv[i], L"--chroma10");
+			g_bChroma10 = !wcscmp(argv[i], L"--chroma10") || !wcscmp(argv[i], L"--clean10");
+			g_bClean = !wcsncmp(argv[i], L"--clean", 7);
 			chromaFile = argv[i + 1];
+		} else if (!wcscmp(argv[i], L"--deblock")) {
+			g_filmDeblock = _wtoi(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--spp")) {
+			g_filmDeblockMethod = DEBLOCK_SPP;
+		} else if (!wcscmp(argv[i], L"--logo")) {
+			g_bLogo = true;
+		} else if (!wcscmp(argv[i], L"--sharpencal")) {
+			g_bSharpenCal = true;
+		} else if (!wcscmp(argv[i], L"--calup") && i + 1 < argc) {
+			g_calUpscaling = _wtoi(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--deband")) {
+			g_filmDeband = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--mainpage")) {
 			pageSeconds = _wtoi(argv[i + 1]);
 		}
@@ -2550,6 +2984,24 @@ int wmain(int argc, wchar_t* argv[])
 		{ "4:2:0, hardware VP, HDR out, RTX Video HDR ON",  false, false, true, -1, -1, true, false, false, true, 1 },
 		{ "4:2:0, VP + 4:4:4 pre-pass, HDR out, RTX Video HDR ON", false, false, true, -1, CHROMA_CatmullRom, true, false, true, true, 1 },
 	};
+	// --clean: the same reference, and the picture coded as MPEG-2 intra blocks through
+	// each path that converts it, without the artifact removal and with it. The cleaning
+	// works on the planes before any of them, so each path has to gain alike; and with
+	// Super Resolution chosen it has to step aside, which leaves the picture as it was.
+	static const Config cleanConfigs[] = {
+		{ "4:4:4 (AYUV), the clean picture",            false, false, true, -1, -1,                false, true  },
+		{ "shaders, nothing",                           false, false, true, -1, CHROMA_CatmullRom, false, false, false, false, -1, -1, -1, -1, 0, 0 },
+		{ "shaders, deblock 3",                         false, false, true, -1, CHROMA_CatmullRom, false, false, false, false, -1, -1, -1, -1, 3, 0 },
+		{ "shaders, deblock 3, deband 3",               false, false, true, -1, CHROMA_CatmullRom, false, false, false, false, -1, -1, -1, -1, 3, 3 },
+		{ "processor, nothing",                         false, false, true, -1, -1,                true,  false, false, false, -1, -1, -1, -1, 0, 0 },
+		{ "processor, deblock 3",                       false, false, true, -1, -1,                true,  false, false, false, -1, -1, -1, -1, 3, 0 },
+		{ "processor, chroma replaced, nothing",        false, false, true, -1, CHROMA_CatmullRom, true,  false, true,  false, -1, -1, -1, -1, 0, 0 },
+		{ "processor, chroma replaced, deblock 3",      false, false, true, -1, CHROMA_CatmullRom, true,  false, true,  false, -1, -1, -1, -1, 3, 0 },
+		{ "processor, Super Resolution, nothing",       false, false, true, -1, -1,                true,  false, false, false, -1, -1, SUPERRES_1080p, -1, 0, 0 },
+		{ "processor, Super Resolution, deblock 3",     false, false, true, -1, -1,                true,  false, false, false, -1, -1, SUPERRES_1080p, -1, 3, 0 },
+		{ "shaders, deblock SPP 3",                     false, false, true, -1, CHROMA_CatmullRom, false, false, false, false, -1, -1, -1, -1, 3, 0, DEBLOCK_SPP },
+		{ "processor, deblock SPP 3",                   false, false, true, -1, -1,                true,  false, false, false, -1, -1, -1, -1, 3, 0, DEBLOCK_SPP },
+	};
 	// --afternr: DLSS 5 NR at the source's size, and each of the ways the picture it
 	// leaves can be enlarged. A run where the shaders enlarge, which they have always
 	// done, is what the runs after it are compared with. There are two of those: the
@@ -2570,17 +3022,64 @@ int wmain(int argc, wchar_t* argv[])
 		{ "the processor enlarges",                   false, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_Disable, -1 },
 		{ "the processor enlarges, Super Resolution", false, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_1440p,   -1 },
 	};
-	if ((g_bAfterNR || g_bVPTurns) && !g_filmFile) {
-		printf("%s plays a real film: --file <film> [--seek <seconds>]\n", g_bAfterNR ? "--afternr" : "--vpturns");
+	// --logo: the channel's logo found and hidden, by the processor and by the shaders.
+	static const Config logoConfigs[] = {
+		{ "logo hidden, the processor enlarges",                  false, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_Disable, 0 },
+		{ "logo hidden, the processor enlarges, Super Resolution", false, false, true, -1, -1, false, false, false, false, -1, 1, SUPERRES_1440p,   0 },
+		{ "logo hidden, the shaders enlarge",                     false, false, true, -1, -1, false, false, false, false, -1, 0, SUPERRES_Disable, -1 },
+	};
+	if ((g_bAfterNR || g_bVPTurns || g_bLogo || g_bSharpenCal) && !g_filmFile) {
+		printf("%s plays a real film: --file <film> [--seek <seconds>]\n", g_bAfterNR ? "--afternr" : g_bLogo ? "--logo"
+			: g_bSharpenCal ? "--sharpencal" : "--vpturns");
 		return 1;
 	}
-	const Config* configs = g_bAfterNR ? afterNRConfigs : g_bVPTurns ? vpTurnConfigs : g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
-	const int configCount = (int)(g_bAfterNR ? std::size(afterNRConfigs) : g_bVPTurns ? std::size(vpTurnConfigs) : g_bChroma ? std::size(chromaConfigs)
+	// --sharpencal: the picture unsharpened first, then each method at its strengths: the
+	// levels it ships with among them, so that the table it is checked against is read too.
+	struct CalMethod { int method; const char* name; std::vector<float> strengths; };
+	const CalMethod calMethods[] = {
+		{ SHARPEN_Adaptive,     "Adaptive-Sharpen", { 0.10f, 0.22f, 0.33f, 0.46f, 0.68f, 0.99f, 1.30f } },
+		{ SHARPEN_UnsharpClamp, "Unsharp + Clamp",  { 0.20f, 0.45f, 0.62f, 0.83f, 1.17f, 1.49f, 1.90f, 2.30f, 2.80f, 3.40f } },
+		{ SHARPEN_CAS,          "AMD CAS",          { 0.25f, 0.50f, 0.75f, 1.00f, 1.50f, 2.00f, 2.50f, 3.00f, 4.00f } },
+	};
+	std::vector<std::string> calNames;
+	std::vector<Config> calConfigs;
+	if (g_bSharpenCal) {
+		calNames.reserve(64);
+		auto add = [&](int method, float strength, std::string name) {
+			calNames.push_back(std::move(name));
+			Config c = { calNames.back().c_str(), false, false, true, g_calUpscaling };
+			c.iSharpen = method;
+			c.fSharpenStrength = strength;
+			calConfigs.push_back(c);
+		};
+		add(SHARPEN_Disabled, 0, "no sharpening");
+		for (const CalMethod& m : calMethods) {
+			for (float st : m.strengths) {
+				add(m.method, st, std::format("{} at {:.2f}", m.name, st));
+			}
+		}
+		// Then each at its five levels as it ships, nothing replaced: the table read back.
+		for (const CalMethod& m : calMethods) {
+			for (int level = SHARPEN_LEVEL_MIN; level <= SHARPEN_LEVEL_MAX; level++) {
+				add(m.method, 0, std::format("{} level {}", m.name, level));
+				calConfigs.back().iSharpenLevel = level;
+			}
+		}
+	}
+	const Config* configs = g_bSharpenCal ? calConfigs.data() : g_bLogo ? logoConfigs : g_bAfterNR ? afterNRConfigs : g_bVPTurns ? vpTurnConfigs : g_bClean ? cleanConfigs
+		: g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
+	const int configCount = (int)(g_bSharpenCal ? calConfigs.size() : g_bLogo ? std::size(logoConfigs) : g_bAfterNR ? std::size(afterNRConfigs) : g_bVPTurns ? std::size(vpTurnConfigs)
+		: g_bClean ? std::size(cleanConfigs) : g_bChroma ? std::size(chromaConfigs)
 		: g_bScalers ? std::size(scalerConfigs) : std::size(dlssConfigs));
 
 	printf("Film %ldx%ld at %.3f fps in a %ldx%ld window, %d s per configuration after 5 s to settle.\n",
 		source.cx, source.cy, 10000000.0 / g_frameDuration, window.cx, window.cy, seconds);
-	if (g_bChroma) {
+	if (g_bClean) {
+		printf("BT.709, limited range, shown at 1:1 with the dither off. The 4:2:0 picture's planes\n");
+		printf("coded as MPEG-2 intra blocks at quantiser_scale_code %d. psnr: the displayed luma\n", kCleanQ);
+		printf("against the clean picture's; block: its steps across the 8-pixel grid over its steps\n");
+		printf("elsewhere, both ways (1.00: none).\n\n");
+	} else if (g_bChroma) {
 		printf("BT.709, limited range, chroma sited left, shown at 1:1 with the dither off.\n");
 		printf("psnr-c: Cb and Cr of the displayed picture against the 4:4:4 one; psnr-e: the\n");
 		printf("same where the luma has edges, where bleeding shows; offset: the constant\n");
@@ -2599,18 +3098,70 @@ int wmain(int argc, wchar_t* argv[])
 	std::vector<BYTE> firstPicture;
 	int firstW = 0, firstH = 0;
 	int failures = 0;
+	std::map<int, CleanMetrics> cleanScores;    // --clean: each run's, by its index
+	std::map<int, double> calGradient;          // --sharpencal: each run's mean luma gradient
+	int calW = 0, calH = 0;
+	std::map<int, std::wstring> cleanLines;     // and what the statistics said of the cleaning
 	for (int c = 0; c < configCount; c++) {
 		if (only >= 0 && c != only) {
 			continue;
 		}
 		const Config& config = configs[c];
 		g_bChroma444 = config.b444; // read by the source pin when the graph is built
+		// The library of logos as this run finds it, put back once its graph is gone: each run
+		// starts on the same, and the maintainer's own is left as it was, whatever the
+		// registry's settings make the filter do on the film.
+		const std::vector<KeptLogo> keptLogos = SaveLogos();
 		const Result r = RunConfig(hFilter, hwnd, config, source, window, seconds);
+		PutLogosBack(keptLogos);
 		printf("== %s\n", config.name);
 		if (!r.error.empty()) {
 			printf("   FAILED: %s\n", r.error.c_str());
 			failures++;
 			continue;
+		}
+		if (g_bSharpenCal) {
+			if (r.picture.empty()) {
+				printf("   FAILED: no displayed picture\n");
+				failures++;
+				continue;
+			}
+			const double g = MeanLumaGradient(r.picture, r.pictureW, r.pictureH);
+			if (calGradient.empty()) {
+				calW = r.pictureW;
+				calH = r.pictureH;
+			}
+			if (r.pictureW != calW || r.pictureH != calH) {
+				printf("   FAILED: not the size of the unsharpened picture\n");
+				failures++;
+				continue;
+			}
+			calGradient[c] = g;
+			wprintf(L"   %s\n", StepLine(r.statsAll, L"Finish").c_str());
+			printf("   mean gradient %.5f%s\n\n", g, c == 0 ? "" : std::format(", {:+.1f} %", 100.0 * (g / calGradient[0] - 1)).c_str());
+			continue;
+		}
+		if (g_bLogo) {
+			printf("   logo: %S\n", r.logoStatus.c_str());
+			printf("   step: %S (%.3f ms)\n", r.logoStep.c_str(), r.logoMs);
+			printf("   hidden after %.1f s, found after %.1f s\n", r.logoHiddenAt, r.logoFoundAt);
+			if (r.logoHiddenAt < 0) {
+				printf("   FAILED: the logo was never hidden\n");
+				failures++;
+			}
+			if (r.logoFoundAt >= 0) {
+				printf("   list: %d kept, the first chosen: %S (choice read back %d), Automatic again: %S\n",
+					r.logoListed, r.logoChosen.c_str(), r.logoChoiceRead, r.logoBack.c_str());
+				if (r.logoListed < 1 || r.logoChosen.find(L", chosen, hidden") == std::wstring::npos || r.logoChoiceRead != 1
+						|| r.logoBack.find(L"kept from") == std::wstring::npos || r.logoBack.find(L"hidden") == std::wstring::npos) {
+					printf("   FAILED: the list of kept logos\n");
+					failures++;
+				}
+			}
+			if (!r.picture.empty() && !r.logoShown.empty()) {
+				SaveBmp(exeDir + L"\\logo_" + std::to_wstring(c) + L"_hidden.bmp", r.picture, r.pictureW, r.pictureH);
+				SaveBmp(exeDir + L"\\logo_" + std::to_wstring(c) + L"_shown.bmp", r.logoShown, r.pictureW, r.pictureH);
+			}
 		}
 		if (g_bVPTurns) {
 			wprintf(L"   processor    : %s\n", r.vprocLine.c_str());
@@ -2709,6 +3260,40 @@ int wmain(int argc, wchar_t* argv[])
 				}
 			}
 			printf("\n");
+			continue;
+		}
+		if (g_bClean) {
+			double ms = -1;
+			const std::wstring artifacts = StepLine(r.statsAll, L"Artifacts", &ms);
+			wprintf(L"   processor    : %s\n", r.vprocLine.c_str());
+			if (config.iDeblock || config.iDeband) {
+				wprintf(L"   artifacts    : %s\n", artifacts.empty() ? L"(no line in the statistics)" : artifacts.c_str());
+			}
+			if (g_bChromaVerbose) {
+				wprintf(L"%s\n", r.statsAll.c_str());
+			}
+			if (r.picture.empty()) {
+				printf("   FAIL: no displayed picture\n");
+				failures++;
+				continue;
+			}
+			SaveBmp(exeDir + L"\\clean_" + std::to_wstring(c) + L".bmp", r.picture, r.pictureW, r.pictureH);
+			if (firstPicture.empty()) {
+				firstPicture = r.picture;
+				firstW = r.pictureW;
+				firstH = r.pictureH;
+				printf("   this is the clean picture the others are measured against\n\n");
+				continue;
+			}
+			if (r.pictureW != firstW || r.pictureH != firstH) {
+				printf("   FAIL: not the size of the clean picture\n");
+				failures++;
+				continue;
+			}
+			const CleanMetrics m = ScoreClean(r.picture, firstPicture, firstW, firstH);
+			cleanScores[c] = m;
+			cleanLines[c] = artifacts;
+			printf("   %-44s psnr %6.2f  block %.3f\n\n", config.name, m.psnr, m.block);
 			continue;
 		}
 		if (g_bChroma) {
@@ -2849,6 +3434,139 @@ int wmain(int argc, wchar_t* argv[])
 				failures++;
 				break;
 			}
+		}
+		printf("\n");
+	}
+
+	// --sharpencal: each method's gain against its strength, and the strength each level's
+	// gain asks of it, read off the curve between the two strengths around it.
+	if (g_bSharpenCal && calGradient.count(0)) {
+		const double targets[SHARPEN_LEVEL_MAX] = { 4, 8, 13, 20, 28 };
+		printf("the strength for each level's gain in mean gradient (+4, +8, +13, +20, +28 %%)\n");
+		int index = 1;
+		for (const CalMethod& m : calMethods) {
+			std::vector<std::pair<double, double>> curve;   // strength, gain in per cent
+			for (float st : m.strengths) {
+				if (calGradient.count(index)) {
+					curve.emplace_back(st, 100.0 * (calGradient[index] / calGradient[0] - 1));
+				}
+				index++;
+			}
+			printf("  %-18s", m.name);
+			for (double t : targets) {
+				double found = -1;
+				for (size_t k = 1; k < curve.size(); k++) {
+					const auto [s0, g0] = curve[k - 1];
+					const auto [s1, g1] = curve[k];
+					if (g0 <= t && t <= g1 && g1 > g0) {
+						found = s0 + (t - g0) / (g1 - g0) * (s1 - s0);
+						break;
+					}
+				}
+				if (found < 0) {
+					printf("   beyond");
+				} else {
+					printf("   %6.3f", found);
+				}
+			}
+			printf("\n");
+		}
+		printf("\nthe levels as they ship, read back (gain in mean gradient, levels 1 to 5)\n");
+		for (const CalMethod& m : calMethods) {
+			printf("  %-18s", m.name);
+			for (int level = SHARPEN_LEVEL_MIN; level <= SHARPEN_LEVEL_MAX; level++, index++) {
+				if (calGradient.count(index)) {
+					printf("  %+6.1f %%", 100.0 * (calGradient[index] / calGradient[0] - 1));
+				} else {
+					printf("      --");
+				}
+			}
+			printf("\n");
+		}
+		printf("\n");
+	}
+
+	// --clean: each path gains with the cleaning, and alike, since the same planes reach
+	// all three; and Super Resolution chosen leaves the picture as it was without it.
+	// SPP, the heavier of the two deblockings, on the shaders' path and the processor's:
+	// it gains there too, and leaves fewer blocks than PP7 at the same level.
+	if (g_bClean && only < 0) {
+		const struct { int off, on; const wchar_t* where; } pairs[] = {
+			{ 1, 2, L"on the planes" }, { 4, 5, L"back into the processor's planes" }, { 6, 7, L"on the planes" },
+		};
+		const struct { int off, on, pp7; const wchar_t* where; } sppPairs[] = {
+			{ 1, 10, 2, L"SPP 3, on the planes" }, { 4, 11, 5, L"SPP 3, back into the processor's planes" },
+		};
+		printf("the artifact removal, path by path\n");
+		double lo = 1e9, hi = -1e9;
+		for (const auto& p : pairs) {
+			if (!cleanScores.count(p.off) || !cleanScores.count(p.on)) {
+				printf("   FAIL: runs %d and %d did not both measure\n", p.off, p.on);
+				failures++;
+				continue;
+			}
+			const CleanMetrics& a = cleanScores[p.off];
+			const CleanMetrics& b = cleanScores[p.on];
+			printf("   %-40s psnr %+.2f dB, block %.3f -> %.3f\n", configs[p.on].name, b.psnr - a.psnr, a.block, b.block);
+			if (b.block > 0.85 * a.block || b.psnr <= a.psnr) {
+				printf("   FAIL: the cleaning did not take the blocks out on this path\n");
+				failures++;
+			}
+			if (cleanLines[p.on].find(p.where) == std::wstring::npos) {
+				wprintf(L"   FAIL: the statistics do not say it ran %s\n", p.where);
+				failures++;
+			}
+			lo = std::min(lo, b.block);
+			hi = std::max(hi, b.block);
+		}
+		if (hi > 1.1 * lo) {
+			printf("   FAIL: the paths do not leave the same blocks (%.3f to %.3f)\n", lo, hi);
+			failures++;
+		}
+		// The driver's Super Resolution cleans the picture itself, even at 1:1, so the run
+		// it is set against is its own without the cleaning asked for.
+		if (cleanScores.count(4) && cleanScores.count(8) && cleanScores.count(9)) {
+			const CleanMetrics& n = cleanScores[4];
+			const CleanMetrics& a = cleanScores[8];
+			const CleanMetrics& b = cleanScores[9];
+			printf("   %-40s psnr %+.2f dB, block %.3f -> %.3f\n", configs[8].name, a.psnr - n.psnr, n.block, a.block);
+			printf("   %-40s psnr %+.2f dB, block %.3f against %.3f\n", configs[9].name, b.psnr - a.psnr, b.block, a.block);
+			if (std::abs(b.block - a.block) > 0.02 * a.block || std::abs(b.psnr - a.psnr) > 0.05
+					|| cleanLines[9].find(L"Super Resolution") == std::wstring::npos) {
+				printf("   FAIL: the cleaning did not step aside for Super Resolution\n");
+				failures++;
+			}
+		}
+		lo = 1e9, hi = -1e9;
+		for (const auto& p : sppPairs) {
+			if (!cleanScores.count(p.off) || !cleanScores.count(p.on) || !cleanScores.count(p.pp7)) {
+				printf("   FAIL: runs %d, %d and %d did not all measure\n", p.off, p.on, p.pp7);
+				failures++;
+				continue;
+			}
+			const CleanMetrics& a = cleanScores[p.off];
+			const CleanMetrics& b = cleanScores[p.on];
+			const CleanMetrics& c = cleanScores[p.pp7];
+			printf("   %-40s psnr %+.2f dB, block %.3f -> %.3f (PP7 %+.2f dB, %.3f)\n", configs[p.on].name,
+				b.psnr - a.psnr, a.block, b.block, c.psnr - a.psnr, c.block);
+			if (b.block > 0.85 * a.block || b.psnr <= a.psnr) {
+				printf("   FAIL: SPP did not take the blocks out on this path\n");
+				failures++;
+			}
+			if (b.block >= c.block) {
+				printf("   FAIL: SPP left as many blocks as PP7\n");
+				failures++;
+			}
+			if (cleanLines[p.on].find(p.where) == std::wstring::npos) {
+				wprintf(L"   FAIL: the statistics do not say %s\n", p.where);
+				failures++;
+			}
+			lo = std::min(lo, b.block);
+			hi = std::max(hi, b.block);
+		}
+		if (hi > 1.1 * lo) {
+			printf("   FAIL: SPP does not leave the same blocks on both paths (%.3f to %.3f)\n", lo, hi);
+			failures++;
 		}
 		printf("\n");
 	}

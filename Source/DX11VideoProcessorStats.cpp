@@ -149,6 +149,15 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 	Rule(std::format(L"Pipeline, in {}", DXGIFormatToString(m_InternalTexFmt)), L"GPU ms");
 	const bool bSubsampled = m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422;
 
+	// The artifact removal, on the decoded planes as the sample is copied; asked for
+	// and not done, it says why.
+	if (m_bHideLogo) {
+		Step(L"Logo", m_bLogoActive ? m_Logo.Status() : m_strLogoWhyNot, Ms(CGpuStageTimes::Logo));
+	}
+	if (m_iDeblock != DEBLOCK_Off || m_bDeband) {
+		Step(L"Artifacts", m_strCleanStatus, Sum(Ms(CGpuStageTimes::Deblock), Ms(CGpuStageTimes::Deband)));
+	}
+
 	// The chroma rebuilt by the shaders and handed to the processor in 4:4:4, as the
 	// sample is copied.
 	if (m_D3D11VP.IsReady() && m_bChromaReplacedVP && bSubsampled) {
@@ -324,7 +333,8 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 			Add(L"tone mapping");
 		}
 		if (m_pPSSharpen) {
-			Add(std::format(L"{} {}", m_iSharpen == SHARPEN_UnsharpClamp ? L"Unsharp + Clamp" : L"Adaptive-Sharpen",
+			Add(std::format(L"{} {}", m_iSharpen == SHARPEN_UnsharpClamp ? L"Unsharp + Clamp"
+				: m_iSharpen == SHARPEN_CAS ? L"AMD CAS" : L"Adaptive-Sharpen",
 				m_iSharpenLevel));
 		}
 		if (m_pPostScaleShaders.size()) {

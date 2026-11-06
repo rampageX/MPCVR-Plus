@@ -101,7 +101,9 @@ tools\dlssnr_probe\build.cmd           REM the measurement tools
 tools\dlssnr_probe\run_all.cmd         REM the whole battery, one report
 ```
 
-Compare the report with `tools/dlssnr_probe/baseline/`. "0 failures" is necessary and not
+`run_all.cmd` ends by masking the working folder and the user's profile in the report
+(`mask_report.py`), so that it can be committed as the reference. Compare the report with
+`tools/dlssnr_probe/baseline/`. "0 failures" is necessary and not
 sufficient — the numbers are what tell you nothing regressed.
 
 The tools compile the filter's own sources, so they measure the shipped code, not a copy of
@@ -174,7 +176,7 @@ A copy of the working folder carries all of this; a clone carries none of it, an
 - `nvngx_dlssnr.dll` and `nvngx_dlss.dll`, at the root: NVIDIA's, never committed and never
   put in a release zip. The harness's DLSS suites need them.
 - `tools/dlssnr_probe/upscale_refs/`: the 4K film frames every picture-quality suite reads,
-  and a film. Not ours to redistribute. `run_all.cmd` measures on `4K1.png` from there, and
+  and a film, `film.mkv`. Not ours to redistribute. `run_all.cmd` measures on `4K1.png` from there, and
   plays the film for the two steps that need the hardware video processor on real pictures.
   Those two also take LAV Filters from where an installed MPC-HC or MPC-BE keeps them
   (`file_graph.inl`), read and never written.
@@ -193,7 +195,11 @@ it does not say:
 
 - **A player writes its settings as it closes**, a copy of it too. Before driving one with
   `mpchc_drive`, export `HKCU\Software\MPC-HC` and
-  `HKCU\Software\MPC-BE Filters\MPC Video Renderer`, and import them back afterwards.
+  `HKCU\Software\MPC-BE Filters\MPC Video Renderer Plus`, and import them back afterwards.
+  The filter's settings are under that key since 2.8; `...\MPC Video Renderer` is the original
+  renderer's, which MPC-HC's own copy uses, and the filter copies it once into its own when it
+  has none (`TakeSettingsOver`). A test on a machine with no key of ours yet deletes the one it
+  made, so that the first real start does the copy.
 - **A test puts back what it moved**: the display mode if it changed it, the filter's
   registry key if it wrote it.
 - **Never send a window of another process a message whose parameter points into our own

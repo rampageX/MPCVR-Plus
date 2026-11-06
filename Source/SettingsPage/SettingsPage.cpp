@@ -140,7 +140,8 @@ static const struct {
 // Which section was being looked at when the page was last closed. It lives
 // beside the settings but is not one of them: Settings_t is append-only and
 // shared with upstream, and where the user had scrolled to is nobody's setting.
-static const wchar_t* const kRegKey = L"Software\\MPC-BE Filters\\MPC Video Renderer";
+// The filter's own key (OPT_REGKEY_VIDEORENDERER in VideoRenderer.cpp).
+static const wchar_t* const kRegKey = L"Software\\MPC-BE Filters\\MPC Video Renderer Plus";
 static const wchar_t* const kRegSection = L"SettingsPageSection";
 
 static int LastSectionLookedAt()
@@ -297,14 +298,56 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		L"Sharpens the picture after resizing, also applies to native screen resolution videos.\n"
 		"Adaptive-Sharpen does not amplify grain, but is heavier.\n"
 		"Unsharp + Clamp is lighter and shows less ringing on clean video.\n"
+		"AMD CAS (FidelityFX contrast adaptive sharpening) sits between the two, nearly as light.\n"
 		"Direct3D 11." },
 	{ IDC_SHARPEN_LEVEL,
-		L"Strength from 1 to 5, the same for both methods. 3 is recommended; 4 and 5 sharpen "
+		L"Strength from 1 to 5, the same for every method. 3 is recommended; 4 and 5 sharpen "
 		"beyond the original detail." },
 	{ IDC_CHECK10,
 		L"Adds a very fine noise before output so that smooth gradients (skies, fades to black) "
 		"don't show banding.\n"
 		"Negligible cost: leave it on." },
+	{ IDC_DEBLOCK,
+		L"Removes the 8x8 blocks and the ringing that strong compression leaves (DVDs, standard-"
+		"definition TV, XviD and DivX files), on the decoded picture before it is converted or resized.\n"
+		"PP7 is light. SPP takes the blocks out further and keeps more of the picture, for about "
+		"three times the GPU time: for a powerful card.\n"
+		"On clean video it only softens fine texture: leave it off for Blu-ray and good encodes.\n"
+		"Progressive video, Direct3D 11. Not with RTX Video Super Resolution, which cleans the "
+		"picture itself." },
+	{ IDC_DEBLOCK_LEVEL,
+		L"Strength from 1 to 5: match it to how damaged the source is. Higher levels remove "
+		"stronger blocks, and more fine detail with them." },
+	{ IDC_DEBAND,
+		L"Smooths the steps that compression leaves in skies, walls and fades, on the decoded "
+		"picture before it is converted or resized. Only differences of a few levels are smoothed: "
+		"edges and detail are kept.\n"
+		"Progressive video, Direct3D 11. Not with RTX Video Super Resolution, which cleans the "
+		"picture itself." },
+	{ IDC_DEBAND_LEVEL,
+		L"Strength from 1 to 5. Raise it until the bands are gone; too high flattens soft "
+		"shading." },
+	{ IDC_HIDE_LOGO,
+		L"Hides a TV channel's logo: worked out from under it where it is see-through, filled in "
+		"from round it where it is opaque. Each logo found is kept, and hidden again on the next "
+		"films of the same size.\n"
+		"Progressive video, Direct3D 11. Stays on with RTX Video Super Resolution, which does not "
+		"hide logos." },
+	{ IDC_LOGO_MARGIN,
+		L"Pixels round the logo worked with it, for an edge the encoder smeared: raise it if a "
+		"faint outline of the logo still shows. Each pixel more makes the patch filled in larger, "
+		"which shows on a detailed background: 1 is recommended." },
+	{ IDC_LOGO_FIND,
+		L"Looks for the logo on the film playing: about 15 seconds of the film to find it, and it is "
+		"hidden from about 30; it gets better over the next minute and a half. Ticks the box and "
+		"takes effect at once, with no Apply. The logo must stay put." },
+	{ IDC_LOGO_FORGET,
+		L"Forgets every logo kept, and stops hiding the one on screen." },
+	{ IDC_LOGO_LIST,
+		L"The logos kept for pictures the size of the film playing, by their size and where they "
+		"sit, the last used first. Automatic: the one on screen is recognised by itself, or found "
+		"with Find the logo. Choose one to hide it now if it was not recognised: it ticks the box "
+		"and takes effect at once, with no Apply, for the film playing." },
 
 	// DLSS 5 NR
 	{ IDC_DLSSNR_ENABLE,
@@ -680,6 +723,7 @@ void CVRSettingsPPage::FillCombos()
 	Send(IDC_SHARPEN, CB_ADDSTRING, 0, (LPARAM)L"Off");
 	Send(IDC_SHARPEN, CB_ADDSTRING, 0, (LPARAM)L"Adaptive-Sharpen");
 	Send(IDC_SHARPEN, CB_ADDSTRING, 0, (LPARAM)L"Unsharp + Clamp");
+	Send(IDC_SHARPEN, CB_ADDSTRING, 0, (LPARAM)L"AMD CAS");
 
 	Combo_AddData(Item(IDC_COMBO10), L"Off (SDR)", -1);
 	Combo_AddData(Item(IDC_COMBO10), L"Passthrough", 0);
@@ -697,6 +741,10 @@ void CVRSettingsPPage::FillCombos()
 	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Fixed",    SDRTM_Fixed);
 	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Metadata", SDRTM_Metadata);
 	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Measured", SDRTM_Measured);
+
+	Combo_AddData(Item(IDC_DEBLOCK), L"Off",                     DEBLOCK_Off);
+	Combo_AddData(Item(IDC_DEBLOCK), L"PP7 (light)",             DEBLOCK_PP7);
+	Combo_AddData(Item(IDC_DEBLOCK), L"SPP (for a powerful GPU)", DEBLOCK_SPP);
 
 	Combo_AddData(Item(IDC_COMBO11), L"Default",   DLSSNR_STYLE_Default);
 	Combo_AddData(Item(IDC_COMBO11), L"Natural",   DLSSNR_STYLE_Natural);
@@ -732,6 +780,16 @@ void CVRSettingsPPage::FillCombos()
 	Send(IDC_SHARPEN_LEVEL, TBM_SETTIC, 0, 1);
 	Send(IDC_SHARPEN_LEVEL, TBM_SETLINESIZE, 0, 1);
 	Send(IDC_SHARPEN_LEVEL, TBM_SETPAGESIZE, 0, 1);
+	Send(IDC_LOGO_MARGIN, TBM_SETRANGE, 0, MAKELONG(LOGO_MARGIN_MIN, LOGO_MARGIN_MAX));
+	Send(IDC_LOGO_MARGIN, TBM_SETTIC, 0, 1);
+	Send(IDC_LOGO_MARGIN, TBM_SETLINESIZE, 0, 1);
+	Send(IDC_LOGO_MARGIN, TBM_SETPAGESIZE, 0, 1);
+	for (const int id : { IDC_DEBLOCK_LEVEL, IDC_DEBAND_LEVEL }) {
+		Send(id, TBM_SETRANGE, 0, MAKELONG(CLEAN_LEVEL_MIN, CLEAN_LEVEL_MAX));
+		Send(id, TBM_SETTIC, 0, 1);
+		Send(id, TBM_SETLINESIZE, 0, 1);
+		Send(id, TBM_SETPAGESIZE, 0, 1);
+	}
 
 	Send(IDC_SLIDER1, TBM_SETRANGE, 0, MAKELONG(0, 2));
 	Send(IDC_SLIDER1, TBM_SETTIC, 0, 1);
@@ -799,6 +857,15 @@ void CVRSettingsPPage::SetControls()
 	Send(IDC_SHARPEN_LEVEL, TBM_SETPOS, 1, m_SetsPP.iSharpenLevel);
 	SetText(IDC_SHARPEN_LEVEL_TEXT, std::to_wstring(m_SetsPP.iSharpenLevel).c_str());
 	SetCheck(IDC_CHECK10, m_SetsPP.bUseDither);
+	Combo_SelectData(Item(IDC_DEBLOCK), m_SetsPP.iDeblock);
+	Send(IDC_DEBLOCK_LEVEL, TBM_SETPOS, 1, m_SetsPP.iDeblockLevel);
+	SetText(IDC_DEBLOCK_LEVEL_TEXT, std::to_wstring(m_SetsPP.iDeblockLevel).c_str());
+	SetCheck(IDC_DEBAND, m_SetsPP.bDeband);
+	SetCheck(IDC_HIDE_LOGO, m_SetsPP.bHideLogo);
+	Send(IDC_LOGO_MARGIN, TBM_SETPOS, 1, m_SetsPP.iLogoMargin);
+	SetText(IDC_LOGO_MARGIN_TEXT, std::format(L"{} px", m_SetsPP.iLogoMargin).c_str());
+	Send(IDC_DEBAND_LEVEL, TBM_SETPOS, 1, m_SetsPP.iDebandLevel);
+	SetText(IDC_DEBAND_LEVEL_TEXT, std::to_wstring(m_SetsPP.iDebandLevel).c_str());
 
 	if (m_SetsPP.bHdrPassthrough) {
 		Combo_SelectData(Item(IDC_COMBO10), 0);
@@ -895,7 +962,7 @@ void CVRSettingsPPage::EnableControls()
 		}
 	}
 
-	// The five that decide each other, worked out in Greying.h so the bench can put
+	// The ones that decide each other, worked out in Greying.h so the bench can put
 	// the same question to them without a film and without a page.
 	const Greying grey = GreyingFor(m_SetsPP, IsWindows8OrGreater() != FALSE,
 		IsWindows10OrGreater() != FALSE, m_bDoViByShaders);
@@ -921,6 +988,30 @@ void CVRSettingsPPage::EnableControls()
 	Enable(IDC_STATIC_SHARPEN_LEVEL, bSharpLevel);
 	Enable(IDC_SHARPEN_LEVEL, bSharpLevel);
 	Enable(IDC_SHARPEN_LEVEL_TEXT, bSharpLevel);
+
+	// The artifact removal follows Greying.h, each level its own box; the line under
+	// them says why they are grey when they are.
+	Enable(IDC_STATIC_DEBLOCK, grey.bCleaning);
+	Enable(IDC_DEBLOCK, grey.bCleaning);
+	Enable(IDC_DEBAND, grey.bCleaning);
+	const BOOL bDeblockLevel = grey.bCleaning && m_SetsPP.iDeblock != DEBLOCK_Off;
+	const BOOL bDebandLevel = grey.bCleaning && m_SetsPP.bDeband;
+	for (const int id : { IDC_STATIC_DEBLOCK_LEVEL, IDC_DEBLOCK_LEVEL, IDC_DEBLOCK_LEVEL_TEXT }) {
+		Enable(id, bDeblockLevel);
+	}
+	for (const int id : { IDC_STATIC_DEBAND_LEVEL, IDC_DEBAND_LEVEL, IDC_DEBAND_LEVEL_TEXT }) {
+		Enable(id, bDebandLevel);
+	}
+	SetText(IDC_STATIC_CLEAN_NOTE,
+		grey.bCleaning ? L"On the decoded video, before it is converted or resized."
+		: !m_SetsPP.bUseD3D11 ? L"Needs Direct3D 11."
+		: L"Left to RTX Video Super Resolution, which cleans the picture itself.");
+	for (const int id : { IDC_HIDE_LOGO, IDC_LOGO_FIND, IDC_LOGO_FORGET, IDC_LOGO_STATUS, IDC_STATIC_LOGO_LIST, IDC_LOGO_LIST }) {
+		Enable(id, grey.bLogo);
+	}
+	for (const int id : { IDC_STATIC_LOGO_MARGIN, IDC_LOGO_MARGIN, IDC_LOGO_MARGIN_TEXT }) {
+		Enable(id, grey.bLogo && m_SetsPP.bHideLogo);
+	}
 
 	// Render ahead and the chroma replacement belong to the Direct3D 11 processor.
 	Enable(IDC_CHECK26, m_SetsPP.bUseD3D11);
@@ -1060,6 +1151,7 @@ HRESULT CVRSettingsPPage::OnActivate()
 			SetText(s.id, status.empty() ? L"" : (L"Status: " + status).c_str());
 		}
 	}
+	ShowLogoStatus();
 
 	SetControls();
 	EnableControls();
@@ -1147,6 +1239,10 @@ INT_PTR CVRSettingsPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, 
 			}
 			EnableControls();
 		}
+		// What hiding the logo is doing: it moves as the film plays.
+		if (uMsg == WM_TIMER) {
+			ShowLogoStatus();
+		}
 	}
 
 	if (uMsg == WM_COMMAND) {
@@ -1179,6 +1275,41 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 			return (INT_PTR)1;
 		}
 
+		// The logo's two buttons act at once, as the preset buttons do: the analysis needs
+		// the film playing, not the page closed.
+		if (action == BN_CLICKED && nID == IDC_LOGO_FIND) {
+			HideLogoNow();
+			if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+				pIExFilterConfig->Flt_SetBool("cmd_findLogo", true);
+			}
+			ShowLogoStatus();
+			return (INT_PTR)1;
+		}
+		// A logo of the list, taken at once for the film playing; Automatic gives it back
+		// to the recognition.
+		if (action == CBN_SELCHANGE && nID == IDC_LOGO_LIST) {
+			const int sel = (int)Send(IDC_LOGO_LIST, CB_GETCURSEL);
+			if (sel > 0) {
+				HideLogoNow();
+			}
+			if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+				pIExFilterConfig->Flt_SetInt("logoChoice", std::max(sel, 0));
+			}
+			m_strLogoMoved.clear();
+			ShowLogoStatus();
+			return (INT_PTR)1;
+		}
+		if (action == BN_CLICKED && nID == IDC_LOGO_FORGET) {
+			if (::MessageBoxW(m_hWnd, L"Forget every logo kept, and stop hiding the one on screen?",
+					L"Channel logo", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+				if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+					pIExFilterConfig->Flt_SetBool("cmd_forgetLogos", true);
+				}
+				ShowLogoStatus();
+			}
+			return (INT_PTR)1;
+		}
+
 		if (action == BN_CLICKED) {
 			// bEnables: the box decides whether other controls still serve.
 			const struct { int id; bool* pValue; bool bEnables; } checks[] = {
@@ -1191,6 +1322,8 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_CHECK8,  &m_SetsPP.VPFmts.bP01x,         true  },
 				{ IDC_CHECK9,  &m_SetsPP.VPFmts.bYUY2,         true  },
 				{ IDC_CHECK10, &m_SetsPP.bUseDither,           false },
+				{ IDC_DEBAND,  &m_SetsPP.bDeband,              true  },
+				{ IDC_HIDE_LOGO, &m_SetsPP.bHideLogo,          true  },
 				{ IDC_CHECK11, &m_SetsPP.bExclusiveFS,         false },
 				{ IDC_CHECK13, &m_SetsPP.bAdjustPresentTime,   false },
 				{ IDC_CHECK14, &m_SetsPP.bConvertToSdr,        true  },
@@ -1291,7 +1424,7 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_COMBO4,  &m_SetsPP.iSwapEffect,        false },
 				{ IDC_COMBO6,  &m_SetsPP.iResizeStats,       false },
 				{ IDC_COMBO7,  &m_SetsPP.iHdrToggleDisplay,  false },
-				{ IDC_COMBO8,  &m_SetsPP.iVPSuperRes,        false },
+				{ IDC_COMBO8,  &m_SetsPP.iVPSuperRes,        true  },   // the artifact removal steps aside for it
 				{ IDC_COMBO9,  &m_SetsPP.iVPDeinterlacing,   false },
 				{ IDC_SHARPEN, &m_SetsPP.iSharpen,           true  },
 			};
@@ -1321,6 +1454,7 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_COMBO15, &m_SetsPP.iDlssSRPreset,    false },
 				{ IDC_COMBO_DVTM,  &m_SetsPP.iHdrDoviToneMappingType, false },
 				{ IDC_COMBO_SDRTM, &m_SetsPP.iSdrToneMappingType,     false },
+				{ IDC_DEBLOCK,     &m_SetsPP.iDeblock,                true  },
 			};
 			for (const auto& c : byData) {
 				if (nID == c.id) {
@@ -1378,6 +1512,30 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				SetDirty();
 			}
 			return (INT_PTR)1;
+		}
+		const struct { int slider, text; int* pValue; } cleanLevels[] = {
+			{ IDC_DEBLOCK_LEVEL, IDC_DEBLOCK_LEVEL_TEXT, &m_SetsPP.iDeblockLevel },
+			{ IDC_DEBAND_LEVEL,  IDC_DEBAND_LEVEL_TEXT,  &m_SetsPP.iDebandLevel  },
+		};
+		if (hCtrl == Item(IDC_LOGO_MARGIN)) {
+			const int value = (int)Send(IDC_LOGO_MARGIN, TBM_GETPOS);
+			if (value != m_SetsPP.iLogoMargin) {
+				m_SetsPP.iLogoMargin = value;
+				SetText(IDC_LOGO_MARGIN_TEXT, std::format(L"{} px", value).c_str());
+				SetDirty();
+			}
+			return (INT_PTR)1;
+		}
+		for (const auto& c : cleanLevels) {
+			if (hCtrl == Item(c.slider)) {
+				const int value = (int)Send(c.slider, TBM_GETPOS);
+				if (value != *c.pValue) {
+					*c.pValue = value;
+					SetText(c.text, std::to_wstring(value).c_str());
+					SetDirty();
+				}
+				return (INT_PTR)1;
+			}
 		}
 		if (hCtrl == Item(IDC_SLIDER1)) {
 			const int value = (int)Send(IDC_SLIDER1, TBM_GETPOS);
@@ -1502,6 +1660,81 @@ int CVRSettingsPPage::PresetKeyShown(int slot)
 {
 	const int vk = (int)Combo_CurData(Item(IDC_PRESET_KEY1 + slot));
 	return vk ? (vk | (int)Combo_CurData(Item(IDC_PRESET_MOD1 + slot))) : 0;
+}
+
+void CVRSettingsPPage::ShowLogoStatus()
+{
+	std::wstring status;
+	if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+		LPWSTR pstr = nullptr;
+		if (S_OK == pIExFilterConfig->Flt_GetString("logoStatus", &pstr, nullptr) && pstr) {
+			status = pstr;
+			CoTaskMemFree(pstr);
+		}
+	}
+	SetText(IDC_LOGO_STATUS, status.empty() ? L"" : (L"Logo: " + status).c_str());
+
+	// The list changes only with what the logo's hiding is doing: read again when the
+	// status says something else, its percentages and sizes aside.
+	std::wstring moved = status;
+	std::erase_if(moved, [](wchar_t c) { return iswdigit(c) != 0; });
+	if (moved != m_strLogoMoved || Send(IDC_LOGO_LIST, CB_GETCOUNT) <= 0) {
+		if (ShowLogoList()) {
+			m_strLogoMoved = moved;
+		}
+	}
+}
+
+bool CVRSettingsPPage::ShowLogoList()
+{
+	if (!Item(IDC_LOGO_LIST) || Send(IDC_LOGO_LIST, CB_GETDROPPEDSTATE)) {
+		return false;   // not under the mouse of someone choosing
+	}
+	std::wstring list;
+	int choice = 0;
+	if (CComQIPtr<IExFilterConfig> pIExFilterConfig = m_pVideoRenderer.p) {
+		LPWSTR pstr = nullptr;
+		if (S_OK == pIExFilterConfig->Flt_GetString("logoList", &pstr, nullptr) && pstr) {
+			list = pstr;
+			CoTaskMemFree(pstr);
+		}
+		if (FAILED(pIExFilterConfig->Flt_GetInt("logoChoice", &choice))) {
+			choice = 0;
+		}
+	}
+	if (list != m_strLogoList || Send(IDC_LOGO_LIST, CB_GETCOUNT) <= 0) {
+		m_strLogoList = list;
+		Send(IDC_LOGO_LIST, CB_RESETCONTENT);
+		Send(IDC_LOGO_LIST, CB_ADDSTRING, 0, (LPARAM)L"Automatic");
+		for (size_t a = 0; a < list.size();) {
+			const size_t b = list.find(L'\n', a);
+			const std::wstring name = list.substr(a, b == std::wstring::npos ? std::wstring::npos : b - a);
+			if (!name.empty()) {
+				Send(IDC_LOGO_LIST, CB_ADDSTRING, 0, (LPARAM)name.c_str());
+			}
+			if (b == std::wstring::npos) {
+				break;
+			}
+			a = b + 1;
+		}
+	}
+	const int count = (int)Send(IDC_LOGO_LIST, CB_GETCOUNT);
+	Send(IDC_LOGO_LIST, CB_SETCURSEL, std::clamp(choice, 0, std::max(count - 1, 0)));
+	return true;
+}
+
+void CVRSettingsPPage::HideLogoNow()
+{
+	m_SetsPP.bHideLogo = true;
+	SetCheck(IDC_HIDE_LOGO, true);
+	Settings_t current;
+	m_pVideoRenderer->GetSettings(current);
+	if (!current.bHideLogo) {
+		current.bHideLogo = true;
+		m_pVideoRenderer->SetSettings(current);
+		m_pVideoRenderer->SaveSettings();
+	}
+	EnableControls();
 }
 
 void CVRSettingsPPage::ShowPresets()

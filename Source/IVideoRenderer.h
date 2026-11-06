@@ -177,23 +177,43 @@ struct VPEnableFormats_t {
 	bool bOther;
 };
 
-// Sharpening, after the resize. Two methods, because they do not win on the same
-// ground: adaptive-sharpen is the only one that does not amplify grain, and the
-// unsharp mask held to what its neighbours cover is five times cheaper and rings
-// less on a clean picture (tools/dlssnr_probe --tsharpen).
+// Sharpening, after the resize. Adaptive-sharpen is the only one that does not amplify
+// grain, and the unsharp mask held to what its neighbours cover is five times cheaper and
+// rings less on a clean picture (tools/dlssnr_probe --tsharpen); AMD's CAS sits between
+// them and is the one asked for by name. Appended: the list saves its position.
 enum : int {
     SHARPEN_Disabled = 0,
     SHARPEN_Adaptive,
     SHARPEN_UnsharpClamp,
+    SHARPEN_CAS,
     SHARPEN_COUNT
 };
 
 // Five levels, and the same level means the same thing whichever method runs:
-// each one's strength was read off its own curve at the edge gradient the other
-// reaches there. Level 3 is where both peak against the reference.
+// Adaptive-Sharpen's are the anchor, and the others give, on the same chain, the
+// gain in mean gradient it gives (playback_test --sharpencal). Level 3 is where the
+// methods peak against the reference.
 constexpr inline auto SHARPEN_LEVEL_MIN = 1;
 constexpr inline auto SHARPEN_LEVEL_MAX = 5;
 constexpr inline auto SHARPEN_LEVEL_DEF = 3;
+
+// Deblocking and debanding on the decoded planes, five levels each: what each level
+// does is in Source/Clean/CleanParams.h, which the measurement tools read as well.
+// The deblocking has two methods: PP7, light, and SPP over 8 grids, three times the
+// cost and closer to the clean picture. The values are Clean::DeblockMethod's.
+enum : int {
+    DEBLOCK_Off = 0,
+    DEBLOCK_PP7,
+    DEBLOCK_SPP,
+    DEBLOCK_COUNT
+};
+constexpr inline auto CLEAN_LEVEL_MIN = 1;
+constexpr inline auto CLEAN_LEVEL_MAX = 5;
+constexpr inline auto CLEAN_LEVEL_DEF = 3;
+// The margin round a channel's logo worked with it, in luma pixels (Logo::kMargin*).
+constexpr inline auto LOGO_MARGIN_MIN = 0;
+constexpr inline auto LOGO_MARGIN_MAX = 3;
+constexpr inline auto LOGO_MARGIN_DEF = 1;
 
 // The picture delay, in milliseconds. Later is what a slow sound asks for; earlier is
 // there for a television that takes longer over the picture than the sound takes to
@@ -316,6 +336,25 @@ struct Settings_t {
 	// DLSSNR_FLOW_*, 0 being Auto. DLSS Super Resolution keeps its own Auto.
 	int  iDlssNRFlowDivider;
 
+	// Artifact removal on the decoded planes, before anything converts or resizes the
+	// picture: deblocking (the codec's 8 x 8 blocks and its ringing) and debanding (the
+	// steps it leaves in smooth gradients), CLEAN_LEVEL_* each. Progressive planar
+	// video, Direct3D 11; RTX Video Super Resolution, which cleans the picture itself,
+	// leaves them out (Greying.h). iDeblock is the method, DEBLOCK_*, 0 for off.
+	int  iDeblock;
+	int  iDeblockLevel;
+	bool bDeband;
+	int  iDebandLevel;
+
+	// A channel's logo hidden: found by "Find the logo" on the settings page, or
+	// recognised from the logos kept, and taken out of the decoded planes before the
+	// deblocking. Progressive two-plane video, Direct3D 11; RTX Video Super Resolution
+	// leaves it on, as it does not hide logos.
+	bool bHideLogo;
+	// The pixels round the logo worked with it, LOGO_MARGIN_*: for an edge the encoder
+	// smeared further than the analysis saw.
+	int  iLogoMargin;
+
 	Settings_t() {
 		SetDefault();
 	}
@@ -404,6 +443,12 @@ struct Settings_t {
 		iVideoDelay                     = 0;
 		iDlssNRWorkingScale             = DLSSNR_SCALE_DEF;
 		iDlssNRFlowDivider              = DLSSNR_FLOW_DEF;
+		iDeblock                        = DEBLOCK_Off;
+		iDeblockLevel                   = CLEAN_LEVEL_DEF;
+		bDeband                         = false;
+		iDebandLevel                    = CLEAN_LEVEL_DEF;
+		bHideLogo                       = false;
+		iLogoMargin                     = LOGO_MARGIN_DEF;
 	}
 };
 

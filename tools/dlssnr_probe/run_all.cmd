@@ -25,7 +25,7 @@ PUSHD "%~dp0"
 SET "REPORT=%~1"
 IF "%REPORT%"=="" SET "REPORT=%~dp0run_all_report.txt"
 SET "REF=upscale_refs\4K1.png"
-SET "FILM=upscale_refs\Fight Club (1999).mkv"
+SET "FILM=upscale_refs\film.mkv"
 
 IF NOT EXIST "dlssnr_harness.exe" (
   ECHO dlssnr_harness.exe is missing. Run build.cmd first.
@@ -51,6 +51,13 @@ CALL :Run "the pipeline"                       "dlssnr_harness.exe --tpipeline -
 CALL :Run "upscalers on film"                  "dlssnr_harness.exe --tupscale --nonr --nomodels"
 CALL :Run "chroma upsamplers on film"          "dlssnr_harness.exe --tchroma --nonr"
 CALL :Run "sharpeners on film"                 "dlssnr_harness.exe --tsharpen --nonr --nomodels"
+REM Deblocking and debanding on the decoded planes, at their five levels, and their
+REM shaders against the reference in double precision.
+CALL :Run "artifact removal on film"           "dlssnr_harness.exe --tclean --nonr --srrefs 4"
+REM The channel's logo: six logos laid over the film, one across a black bar's edge, found,
+REM fitted and taken out, three of them through x264; the shaders against the reference,
+REM and what they cost.
+CALL :Run "a channel's logo hidden on film"     "dlssnr_harness.exe --tlogo --nonr"
 CALL :Run "video processor rebuild"            "vp_rebuild_test.exe"
 CALL :Run "the generated 4:4:4 chroma pass"    "shader444_test.exe"
 CALL :Run "playback, 10 s"                     "playback_test.exe --seconds 10"
@@ -61,11 +68,14 @@ REM bars, which the first step after does by reading it where it lies.
 CALL :Run "the upscalers through the filter, with bars" "playback_test.exe --scalers --letterbox --size 1920x800 --window 3840x2160 --seconds 2"
 CALL :Run "chroma through the filter, 8-bit"   "playback_test.exe --chroma %REF% --seconds 3"
 CALL :Run "chroma through the filter, 10-bit"  "playback_test.exe --chroma10 %REF% --seconds 3"
+CALL :Run "artifact removal through the filter, 8-bit"  "playback_test.exe --clean %REF% --seconds 3"
+CALL :Run "artifact removal through the filter, 10-bit" "playback_test.exe --clean10 %REF% --seconds 3"
 CALL :Run "settings changed while playing"     "playback_test.exe --toggle --seconds 3"
 CALL :Run "the processor's extras, both ways"  "playback_test.exe --switch --toggle --seconds 3"
 CALL :Run "pictures from a decoder's device"   "playback_test.exe --gpu --toggle --seconds 3"
 CALL :Run "the Settings page and its lists"    "playback_test.exe --mainpage 2"
 CALL :Run "the Settings page, DLSS 5 NR"       "playback_test.exe --mainpage 2 --section 4"
+CALL :Run "the Settings page, Detail"          "playback_test.exe --mainpage 2 --section 3"
 REM Five graphs made and unmade in one process, DLSS off and on: what a player does
 REM from one film to the next. It was called "the DLSS page" and ran a switch that no
 REM longer existed, so it played these without saying so -- and it is where the fault of
@@ -74,6 +84,8 @@ CALL :Run "DLSS through the filter, five graphs" "playback_test.exe --seconds 20
 REM The rules of the page alone, with no film: what greys with each DLSS box ticked.
 CALL :Run "what the Settings page greys"       "playback_test.exe --greying"
 CALL :Run "the audio input the statistics follow" "osd_audio_test.exe"
+REM The statistics' text in one call a colour, against two calls a line: the same pixels.
+CALL :Run "the statistics drawn in one call a colour" "osd_draw_test.exe"
 REM "Use the video processor for resizing" with DLSS 5 NR: the processor's second turn,
 REM against the shaders on the same still of a real film, as an SDR picture and as a PQ
 REM one. Nothing above reaches it -- the bench's own film is RGB, which never brings the
@@ -97,6 +109,9 @@ IF "%NAMED%"=="%RAN%" >> "%REPORT%" ECHO 0 failure(s)
 IF NOT "%NAMED%"=="%RAN%" >> "%REPORT%" ECHO 1 failure(s)
 ECHO.>> "%REPORT%"
 ECHO Finished %DATE% %TIME%>> "%REPORT%"
+REM The working folder and the user's profile taken out of the report, so that it can be
+REM committed as the reference without saying whose disk it was measured on.
+python "%~dp0mask_report.py" "%REPORT%" >NUL 2>&1 || ECHO The report keeps this PC's paths: python did not run mask_report.py.
 ECHO.
 ECHO Report: %REPORT%
 FINDSTR /C:"[STEP]" /C:"failure(s)" /C:"check(s) failed" "%REPORT%"

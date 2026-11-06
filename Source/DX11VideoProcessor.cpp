@@ -420,6 +420,12 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_bVPReplaceChroma     = config.bVPReplaceChroma;
 	m_iSharpen             = config.iSharpen;
 	m_iSharpenLevel        = config.iSharpenLevel;
+	m_iDeblock             = config.iDeblock;
+	m_iDeblockLevel        = config.iDeblockLevel;
+	m_bDeband              = config.bDeband;
+	m_iDebandLevel         = config.iDebandLevel;
+	m_bHideLogo            = config.bHideLogo;
+	m_iLogoMargin          = config.iLogoMargin;
 	m_iChromaScaling       = config.iChromaScaling;
 	m_iUpscaling           = config.iUpscaling;
 	m_bUpscalingSmall      = config.bUpscalingSmall;
@@ -728,6 +734,7 @@ void CDX11VideoProcessor::ReleaseVP()
 	}
 
 	m_TexSrcVideo.Release();
+	ReleaseClean(false);
 	m_TexConvertOutput.Release();
 	m_TexResize.Release();
 	m_TexsPostScale.Release();
@@ -769,6 +776,7 @@ void CDX11VideoProcessor::ReleaseDevice()
 	DLog(L"CDX11VideoProcessor::ReleaseDevice()");
 
 	ReleaseVP();
+	ReleaseClean(true);
 	// Tear the NGX session down before the device it was bound to disappears --
 	// Shutdown1 takes that device.
 	m_DlssNR.Shutdown();
@@ -915,19 +923,33 @@ UINT CDX11VideoProcessor::GetPostScaleSteps()
 	return nSteps;
 }
 
-// What level 1 to 5 is worth to each method. The two are not on the same scale,
-// and neither of them is on the scale the bench measured them on: a picture the
+// What level 1 to 5 is worth to each method. The three are not on the same scale,
+// and none of them is on the scale the bench measured them on: a picture the
 // bench had blurred by halving it and enlarging it again is far softer than
 // anything this renderer produces, and adaptive-sharpen -- which holds back where
 // the edges are already steep -- then does almost nothing. So the levels are
 // calibrated here instead, on a 1080p film enlarged to 3200x1334 through the
-// filter itself, as the gain in mean gradient each strength really buys:
-// +4, +8, +13, +20 and +28 per cent. Level 3 is the +13 the bench's own quality
-// measurements settle on (tools/dlssnr_probe --tsharpen).
+// filter itself, as the gain in mean gradient each strength really buys: Adaptive-Sharpen's
+// +4, +8, +13, +20 and +28 per cent in 1.6. Level 3 is the +13 the bench's own quality
+// measurements settle on (tools/dlssnr_probe --tsharpen). The other two are set on it: each
+// of their levels gives, on the same chain, the gain Adaptive-Sharpen's gives, read off the
+// curves through the filter (playback_test --sharpencal) under Catmull-Rom, Jinc2 and
+// FSRCNNX 16 AR and averaged. CAS follows Adaptive-Sharpen closely, the three agreeing to 0.05
+// of a strength; Unsharp + Clamp answers the enlarger's own sharpness more, to 0.23. Until
+// 2.8 its row was 0.45 to 1.49, which gave about two thirds of Adaptive-Sharpen's gain.
 static const float s_SharpenStrength[SHARPEN_COUNT][SHARPEN_LEVEL_MAX] = {
 	{ 0.00f, 0.00f, 0.00f, 0.00f, 0.00f },   // SHARPEN_Disabled
 	{ 0.22f, 0.33f, 0.46f, 0.68f, 0.99f },   // SHARPEN_Adaptive
-	{ 0.45f, 0.62f, 0.83f, 1.17f, 1.49f },   // SHARPEN_UnsharpClamp
+	{ 0.64f, 0.90f, 1.18f, 1.60f, 2.13f },   // SHARPEN_UnsharpClamp
+	{ 0.30f, 0.43f, 0.57f, 0.78f, 1.05f },   // SHARPEN_CAS
+};
+
+// Each method's pass, and the same ending on the dither in 8 and in 10 bits.
+static const UINT s_SharpenPass[SHARPEN_COUNT][3] = {
+	{ 0, 0, 0 },   // SHARPEN_Disabled
+	{ IDF_PS_11_SHARPEN_ADAPTIVE, IDF_PS_11_SHARPEN_ADAPTIVE_DITHER, IDF_PS_11_SHARPEN_ADAPTIVE_DITHER10 },
+	{ IDF_PS_11_SHARPEN_UNSHARP, IDF_PS_11_SHARPEN_UNSHARP_DITHER, IDF_PS_11_SHARPEN_UNSHARP_DITHER10 },
+	{ IDF_PS_11_SHARPEN_CAS, IDF_PS_11_SHARPEN_CAS_DITHER, IDF_PS_11_SHARPEN_CAS_DITHER10 },
 };
 
 // How far the unsharp mask may be pulled back into the range its neighbours
@@ -1043,7 +1065,7 @@ bool CDX11VideoProcessor::UpdateSharpenShader()
 		return bChanged || bTookDither != SharpenTakesDither();
 	}
 
-	const UINT resid = (m_iSharpen == SHARPEN_Adaptive) ? IDF_PS_11_SHARPEN_ADAPTIVE : IDF_PS_11_SHARPEN_UNSHARP;
+	const UINT resid = s_SharpenPass[std::clamp(m_iSharpen, 0, SHARPEN_COUNT - 1)][0];
 	if (FAILED(CreatePShaderFromResource(&m_pPSSharpen, resid))) {
 		DLog(L"CDX11VideoProcessor::UpdateSharpenShader() : the sharpening shader would not load");
 		m_pSharpenConstants.Release();
@@ -1077,9 +1099,7 @@ void CDX11VideoProcessor::UpdateSharpenDitherShader()
 		return;
 	}
 	const bool b10 = (m_SwapChainFmt == DXGI_FORMAT_R10G10B10A2_UNORM);
-	const UINT resid = (m_iSharpen == SHARPEN_Adaptive)
-		? (b10 ? IDF_PS_11_SHARPEN_ADAPTIVE_DITHER10 : IDF_PS_11_SHARPEN_ADAPTIVE_DITHER)
-		: (b10 ? IDF_PS_11_SHARPEN_UNSHARP_DITHER10 : IDF_PS_11_SHARPEN_UNSHARP_DITHER);
+	const UINT resid = s_SharpenPass[std::clamp(m_iSharpen, 0, SHARPEN_COUNT - 1)][b10 ? 2 : 1];
 	if (FAILED(CreatePShaderFromResource(&m_pPSSharpenDither, resid))) {
 		DLog(L"CDX11VideoProcessor::UpdateSharpenDitherShader() : no sharpening with the dither, the dither stays a step");
 		m_pPSSharpenDither.Release();
@@ -2452,6 +2472,10 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	// still takes the picture, in 4:4:4. Read here, so that it means "the option
 	// applies to this picture" and not "the processor was not going to take it".
 	m_bChromaReplacedVP = !disableD3D11VP && ChromaToShaders(FmtParams, m_bInterlaced && m_bInterlacedSeen);
+	// The artifact removal for a processor keeping its own chroma: the planes are cleaned
+	// out of the decoder's texture and written back into the processor's own, which is
+	// then no longer read in place (DX11VideoProcessorClean.cpp).
+	m_bCleanVP = !disableD3D11VP && !m_bChromaReplacedVP && CleanVPWanted(FmtParams);
 	if (disableD3D11VP) {
 		FmtParams.VP11Format = DXGI_FORMAT_UNKNOWN;
 	}
@@ -2591,6 +2615,7 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	}
 
 	if (SUCCEEDED(hr)) {
+		UpdateClean();
 		UpdateBitmapShader();
 		UpdateTexures();
 		UpdatePostScaleTexures();
@@ -2635,7 +2660,18 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 		return hr;
 	}
 
-	hr = m_D3D11VP.InitInputTextures(m_pDevice, m_bChromaReplacedVP);
+	// Its input textures are written by the shaders when they hand it the chroma or the
+	// cleaned planes; the render target views on them are made again with them.
+	m_CleanTargets.clear();
+	hr = m_D3D11VP.InitInputTextures(m_pDevice, m_bChromaReplacedVP || m_bCleanVP);
+	if (FAILED(hr) && m_bCleanVP && !m_bChromaReplacedVP) {
+		// The artifact removal never costs the processor: it reads the decoder's
+		// texture in place again, and the cleaning is left out from then on.
+		DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : no writable input textures ({}), the planes are not cleaned", HR2Str(hr));
+		m_bCleanVP = false;
+		m_bCleanFailed = true;
+		hr = m_D3D11VP.InitInputTextures(m_pDevice, false);
+	}
 	if (FAILED(hr)) {
 		DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : InitInputTextures() failed with error {}", HR2Str(hr));
 		return hr;
@@ -2683,9 +2719,10 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 		}
 	}
 
-	// The chroma pass reads the picture plane by plane, as the shader processor does;
-	// without it the processor takes the frame as it comes.
-	hr = m_bChromaReplacedVP
+	// The chroma pass and the artifact removal read the picture plane by plane, as the
+	// shader processor does; without them the processor takes the frame as it comes.
+	const bool bPlanesRead = m_bChromaReplacedVP || m_bCleanVP;
+	hr = bPlanesRead
 		? m_TexSrcVideo.CreateEx(m_pDevice, params.DX11Format, params.pDX11Planes, width, height, Tex2D_DynamicShaderWrite)
 		: m_TexSrcVideo.Create(m_pDevice, params.VP11Format, width, height, Tex2D_DynamicShaderWriteNoSRV);
 	if (FAILED(hr)) {
@@ -2697,7 +2734,7 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 	m_srcHeight      = height;
 	m_srcParams      = params;
 	m_srcDXGIFormat  = params.VP11Format;   // what the decoder hands over, whatever the processor reads
-	m_pCopyPlaneFn   = GetCopyPlaneFunction(params, m_bChromaReplacedVP ? VP_D3D11_SHADER : VP_D3D11);
+	m_pCopyPlaneFn   = GetCopyPlaneFunction(params, bPlanesRead ? VP_D3D11_SHADER : VP_D3D11);
 
 	if (m_bChromaReplacedVP) {
 		hr = UpdateConvertTo444Shader();
@@ -2912,7 +2949,7 @@ HRESULT CDX11VideoProcessor::ProcessSample(IMediaSample* pSample)
 	// A film that started late used to be caught up here, one picture left out when
 	// eight in a row had waited more than a refresh: with render ahead off, the only
 	// pictures it saw, it left one out every half second at 23.976 fps on a screen at
-	// 23.976 Hz, 245 in 135 s of Fight Club, each a jump and a picture shown twice.
+	// 23.976 Hz, 245 in 135 s of a film, each a jump and a picture shown twice.
 	// The schedule keeps the step itself, and upstream never had it.
 
 	int so = (int)std::clamp(m_RenderStats.syncoffset, -UNITS, UNITS);
@@ -2984,8 +3021,8 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 		// changes below are.
 		if (m_SampleFormat != D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE && !m_bInterlacedSeen) {
 			m_bInterlacedSeen = true;
-			if (m_bChromaReplacedVP && m_D3D11VP.IsReady()) {
-				DLog(L"CDX11VideoProcessor::CopySample() : an interlaced picture, the processor takes the chroma back");
+			if ((m_bChromaReplacedVP || m_bCleanVP) && m_D3D11VP.IsReady()) {
+				DLog(L"CDX11VideoProcessor::CopySample() : an interlaced picture, the processor takes the chroma and the planes back");
 				InitMediaType(&m_pFilter->m_inputMT);
 				m_bDoubleFrames = m_iVPDeinterlacing && m_bDeintDouble && m_D3D11VP.IsReady();
 			}
@@ -3314,10 +3351,10 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			updateStats = true;
 		}
 
-		if (m_bChromaReplacedVP && m_D3D11VP.IsReady() && m_TexSrcVideo.desc.Usage == D3D11_USAGE_DYNAMIC) {
+		if ((m_bChromaReplacedVP || m_bCleanVP) && m_D3D11VP.IsReady() && m_TexSrcVideo.desc.Usage == D3D11_USAGE_DYNAMIC) {
 			// The frame arrives in the decoder's own texture and is copied into this
-			// one, which the chroma pass then reads. A dynamic texture, the one a
-			// frame from memory is mapped into, cannot take a copy.
+			// one, which the chroma pass or the artifact removal then reads. A dynamic
+			// texture, the one a frame from memory is mapped into, cannot take a copy.
 			hr = m_TexSrcVideo.CreateEx(m_pDevice, m_srcParams.DX11Format, m_srcParams.pDX11Planes,
 				m_srcWidth, m_srcHeight, Tex2D_DefaultShader);
 			if (FAILED(hr)) {
@@ -3355,19 +3392,26 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 		}
 #endif
 
-		if (m_D3D11VP.IsReady() && m_bChromaReplacedVP) {
-			// The chroma pass reads the planes, so the frame leaves the decoder's own
-			// texture and is written back in 4:4:4 into the processor's.
+		if (m_D3D11VP.IsReady() && (m_bChromaReplacedVP || m_bCleanVP)) {
+			// The chroma pass and the artifact removal read the planes, so the frame
+			// leaves the decoder's own texture and is written back into the processor's:
+			// in 4:4:4, or cleaned in its own format.
 			D3D11_BOX srcBox = { 0, 0, 0, m_srcWidth, m_srcHeight, 1 };
 			m_pDeviceContext->CopySubresourceRegion(m_TexSrcVideo.pTexture, 0, 0, 0, 0, pD3D11Texture2D, ArraySlice, &srcBox);
-			m_D3D11VP.GetNextInputTexture(m_SampleFormat);
-			ConvertTo444Pass(m_D3D11VP.GetInputUav());
+			CleanPass(pSample);
+			ID3D11Texture2D* pInput = m_D3D11VP.GetNextInputTexture(m_SampleFormat);
+			if (m_bChromaReplacedVP) {
+				ConvertTo444Pass(m_D3D11VP.GetInputUav());
+			} else {
+				CleanToVPInput(pInput);
+			}
 		} else if (m_D3D11VP.IsReady()) {
 			m_D3D11VP.SetInputVideoData(pD3D11Texture2D, pSample, ArraySlice, m_SampleFormat);
 		} else {
 			// here should be used CopySubresourceRegion instead of CopyResource
 			D3D11_BOX srcBox = { 0, 0, 0, m_srcWidth, m_srcHeight, 1 };
 			m_pDeviceContext->CopySubresourceRegion(m_TexSrcVideo.pTexture, 0, 0, 0, 0, pD3D11Texture2D, ArraySlice, &srcBox);
+			CleanPass(pSample);
 		}
 	}
 	else {
@@ -3376,7 +3420,7 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			updateStats = true;
 		}
 
-		if (m_bChromaReplacedVP && m_TexSrcVideo.pTexture && m_TexSrcVideo.desc.Usage != D3D11_USAGE_DYNAMIC) {
+		if ((m_bChromaReplacedVP || m_bCleanVP) && m_TexSrcVideo.pTexture && m_TexSrcVideo.desc.Usage != D3D11_USAGE_DYNAMIC) {
 			// A frame from memory is mapped into this texture, so it goes back to
 			// dynamic, whatever a decoder texture made of it before.
 			hr = m_TexSrcVideo.CreateEx(m_pDevice, m_srcParams.DX11Format, m_srcParams.pDX11Planes,
@@ -3393,11 +3437,15 @@ HRESULT CDX11VideoProcessor::CopySample(IMediaSample* pSample)
 			// do not use UpdateSubresource for D3D11 VP here
 			// because it can cause green screens and freezes on some configurations
 			hr = MemCopyToTexSrcVideo(data, m_srcPitch);
+			// The artifact removal on the planes just written, for whoever reads them.
+			CleanPass(pSample);
 			if (m_D3D11VP.IsReady()) {
 				// ID3D11VideoProcessor does not use textures with D3D11_CPU_ACCESS_WRITE flag
 				ID3D11Texture2D* pInput = m_D3D11VP.GetNextInputTexture(m_SampleFormat);
 				if (m_bChromaReplacedVP) {
 					ConvertTo444Pass(m_D3D11VP.GetInputUav());
+				} else if (m_bCleanVP) {
+					CleanToVPInput(pInput);
 				} else {
 					m_pDeviceContext->CopyResource(pInput, m_TexSrcVideo.pTexture);
 				}
@@ -4217,13 +4265,15 @@ HRESULT CDX11VideoProcessor::ConvertColorPass(ID3D11Texture2D* pRenderTarget)
 	} else {
 		m_pDeviceContext->PSSetShader(m_pPSConvertColor, nullptr, 0);
 	}
-	m_pDeviceContext->PSSetShaderResources(0, 1, &m_TexSrcVideo.pShaderResource.p);
+	// The planes as they stand after the artifact removal, the decoder's otherwise.
+	ID3D11ShaderResourceView* const luma = SrcPlane(0);
+	m_pDeviceContext->PSSetShaderResources(0, 1, &luma);
 	if (m_bMpvChromaActive) {
 		ID3D11ShaderResourceView* chroma[2] = { MpvChromaPlane(0), MpvChromaPlane(1) };
 		m_pDeviceContext->PSSetShaderResources(1, 2, chroma);
 	} else {
-		m_pDeviceContext->PSSetShaderResources(1, 1, &m_TexSrcVideo.pShaderResource2.p);
-		m_pDeviceContext->PSSetShaderResources(2, 1, &m_TexSrcVideo.pShaderResource3.p);
+		ID3D11ShaderResourceView* chroma[2] = { SrcPlane(1), SrcPlane(2) };
+		m_pDeviceContext->PSSetShaderResources(1, 2, chroma);
 	}
 	m_pDeviceContext->PSSetSamplers(0, 1, &m_pSamplerPoint.p);
 	m_pDeviceContext->PSSetSamplers(1, 1, &m_pSamplerLinear.p);
@@ -4663,7 +4713,7 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 				(float)pTex->desc.Width, (float)pTex->desc.Height,
 				1.0f / pTex->desc.Width, 1.0f / pTex->desc.Height,
 				1.0f, 1.0f,
-				s_SharpenStrength[method][level - 1], s_SharpenClamp,
+				m_fSharpenTestStrength > 0 ? m_fSharpenTestStrength : s_SharpenStrength[method][level - 1], s_SharpenClamp,
 				(float)pTex->desc.Width / dither_size, (float)pTex->desc.Height / dither_size, 0, 0
 			};
 			D3D11_MAPPED_SUBRESOURCE mr = {};
@@ -5178,6 +5228,8 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	const bool bDlssNRActiveBefore = m_bDlssNRActive;
 	const bool bDlssSRActiveBefore = m_bDlssSRActive;
 	const bool bRenderAheadBefore  = m_bDlssRenderAhead;
+	// Whether Super Resolution has taken the cleaning over: several settings decide it.
+	const bool bCleaningAllowedBefore = CleaningAllowed();
 
 	// settings that do not require preparation
 	m_bShowStats           = config.bShowStats;
@@ -5343,6 +5395,27 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		changeNumTextures = UpdateSharpenShader() || changeNumTextures;
 	}
 	m_iSharpenLevel = config.iSharpenLevel;   // read afresh with every picture
+	// MPCVR_SHARPEN_STRENGTH=x in the environment replaces the level's strength, read with
+	// every change of the settings: playback_test --sharpencal reads each method's curve
+	// through the filter with it, to calibrate the levels.
+	wchar_t testStrength[32] = {};
+	const DWORD nTest = GetEnvironmentVariableW(L"MPCVR_SHARPEN_STRENGTH", testStrength, (DWORD)std::size(testStrength));
+	m_fSharpenTestStrength = (nTest && nTest < std::size(testStrength)) ? std::max(0.0f, (float)_wtof(testStrength)) : 0.0f;
+
+	// The artifact removal: its levels are taken at the next picture, and the picture on
+	// the screen is cleaned again below.
+	bool changeClean = false;
+	if (config.iDeblock != m_iDeblock || config.iDeblockLevel != m_iDeblockLevel
+			|| config.bDeband != m_bDeband || config.iDebandLevel != m_iDebandLevel
+			|| config.bHideLogo != m_bHideLogo || config.iLogoMargin != m_iLogoMargin) {
+		m_iDeblock      = config.iDeblock;
+		m_iDeblockLevel = config.iDeblockLevel;
+		m_bDeband       = config.bDeband;
+		m_iDebandLevel  = config.iDebandLevel;
+		m_bHideLogo     = config.bHideLogo;
+		m_iLogoMargin   = config.iLogoMargin;
+		changeClean = true;
+	}
 
 	if (config.bVPReplaceChroma != m_bVPReplaceChroma) {
 		m_bVPReplaceChroma = config.bVPReplaceChroma;
@@ -5471,6 +5544,11 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		}
 	}
 
+	// Whether Super Resolution now takes the cleaning over, whichever setting made it so.
+	if (CleaningAllowed() != bCleaningAllowedBefore) {
+		changeClean = true;
+	}
+
 	if (!m_pFilter->GetActive()) {
 		return;
 	}
@@ -5483,6 +5561,10 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 		if (changeHDR && (SourceIsHDR10orHLG() || m_bVPUseRTXVideoHDR || m_bVPRTXVideoHDR) || m_iHdrToggleDisplay) {
 			m_srcVideoTransferFunction = 0;
+			InitMediaType(&m_pFilter->m_inputMT);
+		} else if (changeClean) {
+			// The artifact removal changed too: whether the decoder's texture is read in
+			// place is only chosen there.
 			InitMediaType(&m_pFilter->m_inputMT);
 		}
 		return;
@@ -5509,6 +5591,15 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	// is only chosen as it is made (VPSuperResOutputsEightBits).
 	if (changeSuperRes && m_D3D11VP.IsReady() && VPSuperResOutputsEightBits(m_srcParams.CDepth) != m_bVPOutEightBitsAsked) {
 		changeVP = true;
+	}
+	// The artifact removal for a processor keeping its own chroma decides whether the
+	// decoder's texture is read in place, which only InitMediaType chooses; and Super
+	// Resolution, chosen, takes the cleaning over (Greying.h).
+	if (changeClean && m_D3D11VP.IsReady() && !m_bChromaReplacedVP) {
+		const bool bCleanVP = CleanVPWanted(m_srcParams);
+		if (bCleanVP != m_bCleanVP) {
+			changeVP = true;
+		}
 	}
 
 	if (changeVP) {
@@ -5584,6 +5675,13 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	// The second turn is made for Super Resolution as asked and for the chroma as
 	// kept, and neither of the two always rebuilds anything above.
 	UpdateVPScale();
+
+	// The artifact removal where nothing above rebuilt the processor: the same picture
+	// cleaned again, so that a paused one shows the change.
+	if (changeClean) {
+		UpdateClean();
+		CleanAgain();
+	}
 
 	UpdateStatsStatic();
 }

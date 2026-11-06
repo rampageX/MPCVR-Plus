@@ -34,7 +34,9 @@
 
 #define WM_SWITCH_FULLSCREEN (WM_APP + 0x1000)
 
-#define OPT_REGKEY_VIDEORENDERER           L"Software\\MPC-BE Filters\\MPC Video Renderer"
+// MPCVR-Plus keeps its settings apart from the original renderer's (TakeSettingsOver).
+#define OPT_REGKEY_VIDEORENDERER           L"Software\\MPC-BE Filters\\MPC Video Renderer Plus"
+#define OPT_REGKEY_ORIGINAL                L"Software\\MPC-BE Filters\\MPC Video Renderer"
 #define OPT_UseD3D11                       L"UseD3D11"
 #define OPT_ShowStatistics                 L"ShowStatistics"
 #define OPT_ResizeStatistics               L"ResizeStatistics"
@@ -51,6 +53,12 @@
 #define OPT_VPReplaceChroma                L"VPReplaceChroma"
 #define OPT_Sharpen                        L"Sharpen"
 #define OPT_SharpenLevel                   L"SharpenLevel"
+#define OPT_Deblock                        L"Deblock"
+#define OPT_DeblockLevel                   L"DeblockLevel"
+#define OPT_Deband                         L"Deband"
+#define OPT_DebandLevel                    L"DebandLevel"
+#define OPT_HideLogo                       L"HideLogo"
+#define OPT_LogoMargin                     L"LogoMargin"
 #define OPT_ChromaUpsampling               L"ChromaUpsampling"
 #define OPT_Upscaling                      L"Upscaling"
 #define OPT_Downscaling                    L"Downscaling"
@@ -173,6 +181,24 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_SharpenLevel, dw)) {
 		sets.iSharpenLevel = discard<int>(dw, SHARPEN_LEVEL_DEF, SHARPEN_LEVEL_MIN, SHARPEN_LEVEL_MAX);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_Deblock, dw)) {
+		sets.iDeblock = discard<int>(dw, DEBLOCK_Off, DEBLOCK_Off, DEBLOCK_COUNT - 1);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DeblockLevel, dw)) {
+		sets.iDeblockLevel = discard<int>(dw, CLEAN_LEVEL_DEF, CLEAN_LEVEL_MIN, CLEAN_LEVEL_MAX);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_Deband, dw)) {
+		sets.bDeband = !!dw;
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DebandLevel, dw)) {
+		sets.iDebandLevel = discard<int>(dw, CLEAN_LEVEL_DEF, CLEAN_LEVEL_MIN, CLEAN_LEVEL_MAX);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HideLogo, dw)) {
+		sets.bHideLogo = !!dw;
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_LogoMargin, dw)) {
+		sets.iLogoMargin = discard<int>(dw, LOGO_MARGIN_DEF, LOGO_MARGIN_MIN, LOGO_MARGIN_MAX);
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_ChromaUpsampling, dw)) {
 		sets.iChromaScaling = discard<int>(dw, CHROMA_CatmullRom, 0, CHROMA_COUNT-1);
@@ -349,6 +375,12 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(OPT_VPReplaceChroma,     sets.bVPReplaceChroma);
 	key.SetDWORDValue(OPT_Sharpen,             sets.iSharpen);
 	key.SetDWORDValue(OPT_SharpenLevel,        sets.iSharpenLevel);
+	key.SetDWORDValue(OPT_Deblock,             sets.iDeblock);
+	key.SetDWORDValue(OPT_DeblockLevel,        sets.iDeblockLevel);
+	key.SetDWORDValue(OPT_Deband,              sets.bDeband);
+	key.SetDWORDValue(OPT_DebandLevel,         sets.iDebandLevel);
+	key.SetDWORDValue(OPT_HideLogo,            sets.bHideLogo);
+	key.SetDWORDValue(OPT_LogoMargin,          sets.iLogoMargin);
 	key.SetDWORDValue(OPT_ChromaUpsampling,    sets.iChromaScaling);
 	key.SetDWORDValue(OPT_Upscaling,           sets.iUpscaling);
 	key.SetDWORDValue(OPT_Downscaling,         sets.iDownscaling);
@@ -396,6 +428,35 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(OPT_UpscalingSmall,      sets.bUpscalingSmall);
 	key.SetDWORDValue(OPT_UpscalingSmallFilter, sets.iUpscalingSmall);
 	key.SetDWORDValue(OPT_VideoDelay,          (DWORD)sets.iVideoDelay);
+}
+
+// The settings are this renderer's own. The original is often on the same machine -- MPC-HC
+// carries it in its MPCVR folder, MPC-BE installs it -- and a key shared with it was read
+// by a renderer that knows none of the methods added to the lists here, which it set back
+// to its defaults and wrote back so the first time its page was applied. The first time,
+// the original's key is copied, settings and presets, and left as it is; a key of ours
+// that exists, even empty, is never copied over (Reset_Settings.cmd leaves one).
+static void TakeSettingsOver()
+{
+	CRegKey plus;
+	if (ERROR_SUCCESS == plus.Open(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER, KEY_READ)) {
+		return;
+	}
+	CRegKey original;
+	if (ERROR_SUCCESS != original.Open(HKEY_CURRENT_USER, OPT_REGKEY_ORIGINAL, KEY_READ)) {
+		return;
+	}
+	// RegCopyTreeW wants every right on the key it copies into: with KEY_READ | KEY_WRITE
+	// it is ERROR_ACCESS_DENIED and nothing is copied. A copy that fails takes its empty
+	// key away again, or the defaults would stay for good; the next start tries again.
+	if (ERROR_SUCCESS == plus.Create(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER, REG_NONE, REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS)) {
+		const LSTATUS ret = RegCopyTreeW(original, nullptr, plus);
+		if (ret != ERROR_SUCCESS) {
+			DLog(L"TakeSettingsOver() : the original's settings were not copied, error {}", ret);
+			plus.Close();
+			RegDeleteTreeW(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER);
+		}
+	}
 }
 
 // Presets: ten keys beside the settings, each holding a whole Settings_t under
@@ -512,6 +573,7 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 
 	// read settings
 
+	TakeSettingsOver();
 	CRegKey key;
 	if (ERROR_SUCCESS == key.Open(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER, KEY_READ)) {
 		ReadSettings(key, m_Sets);
@@ -980,6 +1042,32 @@ HRESULT CMpcVideoRenderer::SetMediaType(const CMediaType *pmt)
 	m_videoAspectRatio = aspectNew;
 
 	return S_OK;
+}
+
+// The film's name is read here, once: the graph is being built on this thread and answers
+// at once. Asked again from InitMediaType, it was asked on the streaming thread too -- a
+// Dolby Vision film sets its media type again on its first picture -- with the renderer's
+// locks held, and the graph then waited for the thread starting it, which was waiting for
+// those locks: the player hung as the film opened, whenever the logo was to be hidden.
+HRESULT CMpcVideoRenderer::CompleteConnect(IPin* pReceivePin)
+{
+	m_strFilm.clear();
+	CComPtr<IEnumFilters> filters;
+	if (m_pGraph && SUCCEEDED(m_pGraph->EnumFilters(&filters))) {
+		CComPtr<IBaseFilter> filter;
+		while (filters->Next(1, &filter, nullptr) == S_OK) {
+			CComQIPtr<IFileSourceFilter> source(filter);
+			LPOLESTR path = nullptr;
+			if (source && SUCCEEDED(source->GetCurFile(&path, nullptr)) && path) {
+				const std::wstring name(path);
+				CoTaskMemFree(path);
+				m_strFilm = name.substr(name.find_last_of(L"\\/") + 1);
+				break;
+			}
+			filter.Release();
+		}
+	}
+	return __super::CompleteConnect(pReceivePin);
 }
 
 HRESULT CMpcVideoRenderer::DoRenderSample(IMediaSample* pSample)
@@ -2083,6 +2171,12 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetInt(LPCSTR field, int* value)
 		}
 		return S_OK;
 	}
+	// The logo chosen in the settings page's list: 0 for the one found or recognised.
+	if (!strcmp(field, "logoChoice")) {
+		CAutoLock cRendererLock(&m_RendererLock);
+		*value = m_VideoProcessor ? m_VideoProcessor->GetLogoChoice() : 0;
+		return S_OK;
+	}
 	if (!strcmp(field, "playbackState")) {
 		*value = m_filterState;
 		return S_OK;
@@ -2125,14 +2219,20 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetString(LPCSTR field, LPWSTR* value, unsig
 	// One line describing the DLSS 5 NR session, or the DLSS Super Resolution one,
 	// for the property page. "statsText" is the statistics as drawn on the picture,
 	// for tools that log them.
+	// "logoStatus": what hiding the channel's logo is doing; "logoList": the logos kept for
+	// the film playing, one a line, as the settings page lists them.
 	const bool bNR = !strcmp(field, "dlssStatus");
 	const bool bSR = !strcmp(field, "dlssSRStatus");
 	const bool bStats = !strcmp(field, "statsText");
-	if (bNR || bSR || bStats) {
+	const bool bLogo = !strcmp(field, "logoStatus");
+	const bool bLogoList = !strcmp(field, "logoList");
+	if (bNR || bSR || bStats || bLogo || bLogoList) {
 		CAutoLock cRendererLock(&m_RendererLock);
 		std::wstring str;
 		if (m_VideoProcessor) {
-			str = bStats ? m_VideoProcessor->GetStatsText()
+			str = bLogoList ? m_VideoProcessor->GetLogoList()
+				: bLogo ? m_VideoProcessor->GetLogoStatus()
+				: bStats ? m_VideoProcessor->GetStatsText()
 				: bSR ? m_VideoProcessor->GetDlssSRStatus() : m_VideoProcessor->GetDlssStatus();
 		}
 		const size_t len = str.size();
@@ -2173,6 +2273,28 @@ STDMETHODIMP CMpcVideoRenderer::Flt_SetBool(LPCSTR field, bool value)
 {
 	if (!strcmp(field, "cmd_redraw") && value) {
 		Redraw();
+		return S_OK;
+	}
+
+	// The settings page's two buttons for the channel's logo: they act at once, as the
+	// preset buttons do, with no Apply.
+	if (!strcmp(field, "cmd_findLogo") && value) {
+		CAutoLock cRendererLock(&m_RendererLock);
+		if (m_VideoProcessor) {
+			m_VideoProcessor->FindLogo();
+		}
+		return S_OK;
+	}
+	if (!strcmp(field, "cmd_forgetLogos") && value) {
+		{
+			CAutoLock cRendererLock(&m_RendererLock);
+			if (m_VideoProcessor) {
+				m_VideoProcessor->ForgetLogos();
+			}
+		}
+		if (m_State != State_Running) {
+			Redraw();
+		}
 		return S_OK;
 	}
 
@@ -2268,6 +2390,21 @@ STDMETHODIMP CMpcVideoRenderer::Flt_SetInt(LPCSTR field, int value)
 			m_VideoProcessor->SetStereo3dTransform(value);
 			return S_OK;
 		}
+	}
+
+	// A logo of the settings page's list taken at once, as its buttons act: the i-th of
+	// the last "logoList", or 0 for the one recognised by itself.
+	if (!strcmp(field, "logoChoice")) {
+		{
+			CAutoLock cRendererLock(&m_RendererLock);
+			if (m_VideoProcessor) {
+				m_VideoProcessor->ChooseLogo(value);
+			}
+		}
+		if (m_State != State_Running) {
+			Redraw();
+		}
+		return S_OK;
 	}
 
 	return E_INVALIDARG;

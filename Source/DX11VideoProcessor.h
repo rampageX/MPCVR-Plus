@@ -28,6 +28,7 @@
 #include "IVideoRenderer.h"
 #include "DX11Helper.h"
 #include "D3D11VP.h"
+#include "DX11LogoHider.h"
 #include "D3DUtil/D3D11Font.h"
 #include "OsdPlus/Overlay.h"
 #include "D3DUtil/D3D11Geometry.h"
@@ -244,6 +245,7 @@ private:
 	// levels, and the shader that does it.
 	int m_iSharpen = SHARPEN_Disabled;
 	int m_iSharpenLevel = SHARPEN_LEVEL_DEF;
+	float m_fSharpenTestStrength = 0;   // MPCVR_SHARPEN_STRENGTH, 0 when not set
 	CComPtr<ID3D11PixelShader> m_pPSSharpen;
 	CComPtr<ID3D11Buffer> m_pSharpenConstants;
 	// The same method ending on the dither, for when sharpening is the last step
@@ -258,6 +260,63 @@ private:
 	bool m_bChromaReplacedVP = false;   // and the shaders rebuild this source's chroma
 	DXGI_FORMAT m_VPInputFmt = DXGI_FORMAT_UNKNOWN;   // what the processor reads: the source, or packed 4:4:4
 	CComPtr<ID3D11ComputeShader> m_pCSConvertTo444;   // what writes that 4:4:4 picture
+
+	// Artifact removal on the decoded planes (DX11VideoProcessorClean.cpp): the settings,
+	// whether this media type gets it, and the planes it writes.
+	int  m_iDeblock = DEBLOCK_Off; // the method, DEBLOCK_*
+	int  m_iDeblockLevel = CLEAN_LEVEL_DEF;
+	bool m_bDeband = false;
+	int  m_iDebandLevel = CLEAN_LEVEL_DEF;
+	bool m_bCleanActive = false;   // this media type is cleaned
+	bool m_bCleanVP = false;       // and the processor, keeping its own chroma, is given the planes back
+	bool m_bCleanFailed = false;   // its planes took no render target: left out from then on
+	int  m_iCleanResult = 0;       // the picture in m_TexSrcVideo was cleaned: 1 deblocked (A), 2 debanded (B)
+	uint32_t m_uCleanSeed = 0;     // the grain's, from the picture's time
+	std::wstring m_strCleanStatus; // for the statistics
+	CComPtr<ID3D11ComputeShader> m_pCSDeblock[2][2];   // [PP7, SPP][one channel, two (Cb and Cr together)]
+	CComPtr<ID3D11ComputeShader> m_pCSDeband[2];
+	CComPtr<ID3D11Buffer> m_pCleanConstants;
+	struct CleanPlane {
+		Tex2D_t tex;
+		CComPtr<ID3D11UnorderedAccessView> pUav;
+		int channels = 1;
+	};
+	CleanPlane m_CleanA[3], m_CleanB[3];
+	struct CleanTarget {
+		ID3D11Texture2D* pTexture = nullptr;   // identity only
+		CComPtr<ID3D11RenderTargetView> pLuma, pChroma;
+	};
+	std::vector<CleanTarget> m_CleanTargets;   // the processor's input textures, a render target a plane
+	bool m_bCleanFilters = false;  // the deblocking or the debanding runs on this media type
+	// Hiding a channel's logo, the first step of the cleaning (DX11LogoHider.cpp,
+	// DX11VideoProcessorClean.cpp): the setting, whether this media type gets it, and the
+	// time of the picture last cleaned, for a redraw of it.
+	bool m_bHideLogo = false;
+	int  m_iLogoMargin = LOGO_MARGIN_DEF;
+	bool m_bLogoActive = false;
+	std::wstring m_strLogoWhyNot;  // for the statistics, when asked for and not done
+	REFERENCE_TIME m_rtCleaned = 0;
+	CDX11LogoHider m_Logo;
+	bool LogoFormatOk(const FmtConvParams_t& params) const;
+	bool CleanVPWanted(const FmtConvParams_t& params) const;
+	std::wstring LogoFilm() const;
+	bool CleaningAllowed() const;
+	bool CleanFormatOk(const FmtConvParams_t& params) const;
+	bool CleanPlaneTargetsOk(const DXGI_FORMAT fmt) const;
+	HRESULT UpdateCleanShaders();
+	void ReleaseClean(const bool bShaders);
+	void UpdateClean();
+	void UpdateCleanStatus();
+	void CleanPlaneInfo(const int i, UINT& w, UINT& h, int& channels) const;
+	int CleanPlaneCount() const;
+	HRESULT CleanTargets(CleanPlane* set);
+	void CleanRun(const REFERENCE_TIME rt, const bool newPicture);
+	void CleanPass(IMediaSample* pSample);
+	HRESULT CleanToVPInput(ID3D11Texture2D* pInput);
+	void CleanAgain();
+	// The planes as the conversion reads them: cleaned when the cleaning ran on this
+	// picture, the decoder's otherwise. 0 luma, 1 the second plane, 2 the third.
+	ID3D11ShaderResourceView* SrcPlane(const int i) const;
 
 	CDlssNR m_DlssNR;
 	CDlssNR::Params m_DlssParams;
@@ -714,6 +773,12 @@ private:
 	//void UpdateStatsPostProc();
 	HRESULT DrawStats(ID3D11Texture2D* pRenderTarget);
 	std::wstring GetStatsText() override;
+	void FindLogo() override;
+	void ForgetLogos() override;
+	std::wstring GetLogoStatus() override;
+	std::wstring GetLogoList() override;
+	int GetLogoChoice() override;
+	void ChooseLogo(int i) override;
 	int GetRenderAhead() override;
 
 public:

@@ -1,9 +1,11 @@
 # The reference numbers
 
-`run_all_report.txt` here is what the whole battery measured on 30 October 2026, on an
-RTX 4060 (driver 32.0.16.1742) with the Windows desktop in HDR, all twenty-six steps green.
-The filter is `223984b`, build 2787, and filter and tools are built by MSVC 14.44. It is the thing
-a merge from upstream is compared against, at step 8 of
+`run_all_report.txt` here is what the whole battery measured on 5 November 2026, on an
+RTX 4060 (driver 32.0.16.1742) with the Windows desktop in HDR and Windows' hardware-accelerated
+GPU scheduling on, all thirty-one steps green. The filter and the tools are the code of
+`c86cfba`, as the report's commit line says, both built by MSVC 14.44. `run_all.cmd` masks
+the working folder and the user's profile in it (`<repo>`, `%USERPROFILE%`). It is the thing a
+merge from upstream is compared against, at step 8 of
 [MERGING-UPSTREAM.md](../../../MERGING-UPSTREAM.md):
 
 ```
@@ -35,6 +37,83 @@ down. The tables move with:
 So the baseline is a local artefact of a known-good state, not a universal truth. When a
 merge lands and the numbers are explained, replace this file with the new report — that is
 step 10.
+
+## With AMD CAS, a settings key of its own, and no hang on a Dolby Vision film
+
+Against the report it replaces (`03f1c21`, 3 November), 3155 rows compared, 13 moved, one gone
+and one new, no failure in either. The settings now come from the filter's own key, copied
+from the original renderer's, so the battery measured the same settings as before.
+
+- The gone row and the new one are a fault of the report before, not of the code: in the
+  block of the channel's name through x264, two outputs had crossed and the line read
+  `pictures looked at  found  60  1.000 1.79`, its `box` and the `pictures fitted on` header
+  lost. This report prints them as the other blocks do, and the comparison's rank for the
+  `60` row of that logo moved with it.
+- Eleven rows of the logo step, all of the three logos through x264: x264 does not encode the
+  film the same from one run to the next, as the section below found; the largest, the logo
+  across the bar through x264, 46.55 to 46.30 dB.
+- The pipeline's bare "frame, upload to done", its maximum at 19.76 ms where it read 9.56, as it
+  has flipped since the 25th of October, and a 95th percentile of 0.57 where it was 0.74.
+
+The sharpeners on film (`--tsharpen`) did not move: AMD CAS was among the six measured there
+since 1.6. Its levels are checked through the filter by `playback_test --sharpencal`, which is
+not a step of the battery.
+
+## With a logo across a black bar
+
+Against the report it replaces (`03f1c21`, 3 November), 3099 rows compared, 56 new and none
+gone, no failure in either. The new rows are the logo step's sixth logo, half over the bar
+above the picture, as laid and through x264, and two lines each logo now prints: the spread of
+its colour, and the picture's rows found blended with a bar. Thirteen rows moved by more than
+0.1:
+
+- ten in the logo step, its rows 6 and 7, which are other logos than they were: the sixth logo
+  is 6 now, the translucent one through x264 is 7 and the channel's name through x264 8. Read
+  logo by logo, those two moved by 0.47 and 0.21 dB, the better, and so did what is left on
+  screen with the logo not taken out (12.59 to 12.60, its chroma 46.37 to 46.49), which reads
+  nothing of the code: x264 does not encode the film the same from one run to the next. The
+  bars told on every picture move them by 0.04 dB at most (`--tlogo --study`);
+- the pipeline's bare "frame, upload to done", its maximum at 9.56 ms where it read 16.12, as
+  it has flipped since the 25th of October;
+- the two runs of the upscalers through the filter that had shown one picture late, none now.
+
+What hiding a logo costs grew by 0.012 to 0.022 ms a picture at 1080p, the bars told on every
+picture, and the outlined logo, where a dark scene of the film passes for a bar, is at 51.07
+dB against 51.08.
+
+## With the channel's logo hidden
+
+Against the report it replaces (`0b092d1`, 2 November), 2973 rows compared, 126 new and none
+gone. The new rows are the step of the logo's hiding, `--tlogo` (five logos found, fitted and
+taken out, two of them through x264, the shaders against the reference and their cost), and
+the logo's column in the step that checks what the settings page greys. Four rows moved by
+more than 0.1, all times: the pipeline's bare "frame, upload to done", whose maximum read
+16.12 ms where the report before had 7.95 (run again alone, 16.69; it has flipped between
+about 10.5 and 17.5 since the 25th of October, as the sections below record), and one picture
+shown late in two runs of the upscalers through the filter, gone when the step was run again.
+No picture moved: the logo's hiding is off unless it is asked for.
+
+## With SPP beside PP7
+
+Against the report it replaces (`2d241d4`, 1 November), 2883 rows compared, 145 new and 55
+gone, and 61 moved by more than 0.1. All but two of the moved and all of the gone are the
+layout of the artifact removal's own tables, not their values: the deblocking levels are
+printed for each method, so what was row `1` is now `PP7 1`, and the 55 PP7 rows and 55
+debanding rows are the same to 0.001 as before; the SPP port checks come before the
+debanding's, so four `[ok` rows compared by position read another line. The other two are
+the pipeline's bare times again ("frame, upload to done"), faster: the first 10.94 ms to
+7.77. The new rows are SPP's levels, port checks and costs, its two runs in `--clean` and
+`--clean10`, and its toggle in the steps that change settings while a film plays. No
+picture moved.
+
+## With the artifact removal
+
+Against the report it replaces (`223984b`, 30 October), 2669 rows compared, 214 new and
+none gone: the new rows are the four steps of the deblocking and debanding -- `--tclean`,
+`--clean`, `--clean10` and the Detail tab -- and their toggles in the three steps that change
+settings while a film plays. Two rows moved by more than 0.1, both the pipeline's bare
+times ("frame, upload to done"), the first after hardware-accelerated GPU scheduling was
+turned on (31 October); no picture moved.
 
 ## From the RTX 3050 to the RTX 4060
 
@@ -275,7 +354,7 @@ pipeline's "frame, upload to done", printed bare as mean / 95th percentile / max
   95th percentile between about 10.5 and 16.5 noted on the 25th;
 - with Catmull-Rom alone, a maximum of 0.57 ms then, 0.78 now.
 
-Three batteries ran on the way, in the worktree `E:\MPCVR-0.11`:
+Three batteries ran on the way, in a worktree of its own, `MPCVR-0.11`:
 
 - at `00d7d36`, the merge: 5 moved. Two were the chroma suite's pictures with RTX Video HDR
   on, 30.00 and 30.03 dB (the second with the 4:4:4 pre-pass) read 46.82 and 52.72: the
@@ -288,6 +367,6 @@ Three batteries ran on the way, in the worktree `E:\MPCVR-0.11`:
   time, the two rows above.
 
 Each of those three counted 26 rows new, none of them a measurement: the report prints the
-paths of the DLLs and the pictures it loads, and the comparison reads the `0.11` of
-`E:\MPCVR-0.11` in them as a number. This report, run in the main folder, has none. NGX's
+paths of the DLLs and the pictures it loads, and the comparison reads the `0.11` of the
+worktree's name in them as a number. This report, run in the main folder, has none. NGX's
 lines about `nvngx_dlssnr.dll`'s signature are the eleven of the report before.
