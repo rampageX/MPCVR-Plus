@@ -1,27 +1,38 @@
-# MPCVR-Plus OSD v1.0.6
+# MPCVR-Plus OSD v1.0.7
 
 ## Changes
 
-- Integrate MPCVR-Plus 2.5 and MPC Video Renderer 0.11.1.
-- Include upstream HDR-to-SDR Metadata and Measured modes, Spline tone mapping, Dolby Vision tone mapping selection, and R10k input support.
-- Include upstream presentation timing, render-ahead settings, preset isolation, and HDR state fixes.
-- Preserve OSD-Plus version labels, colored statistics, audio metadata, adapter-specific monitoring, and hidden sync graph with text statistics retained.
-- Upstream 2.5 now includes OSD Plus and credits rampageX.
+- Integrate MPCVR-Plus 2.8, including the changes from 2.6 and 2.7.
+- Add upstream PP7/SPP deblocking, libplacebo-based debanding, and GPU channel-logo detection and removal.
+- Add AMD CAS sharpening and upstream sharpening-level calibration. Unsharp + Clamp now sharpens more at the same saved level.
+- Include upstream OSD draw batching and player private-working-set (DRAM) statistics.
+- Include upstream HDR10/Dolby Vision startup deadlock fix.
+- Use upstream's independent settings key, `HKCU\Software\MPC-BE Filters\MPC Video Renderer Plus`. Existing settings are copied on first use.
+- Preserve the fork's OSD-Plus version labels and hidden sync graph, with text statistics retained.
+- Update the displayed OSD-Plus version to 1.0.7.
 
 ## Validation
 
-- Audio input selection and reported bit-depth regression checks passed with UndefinedBehaviorSanitizer.
+- The user confirmed playback acceptance of integration commit `a4f74344db6fc45e4b0bedd9a6c385bf954b983f`.
+- The release build changes only `Source/OsdPlus/Version.h` from that accepted integration, updating the display label from 1.0.6 to 1.0.7.
+- Audio input-selection and reported bit-depth regression checks passed with UndefinedBehaviorSanitizer.
 - OSD integration hooks and merge conflict markers checked.
-- Win32 and x64 filters built by GitHub Actions.
-- This release has not been playback-tested on an RTX 4080 or the user's laptop. Compilation and portable checks do not replace Windows playback acceptance.
+- GitHub Actions built both Win32 and x64 filters.
+- The final version-label-only rebuild has not been separately playback-tested.
 
-## Accepted build
+## Build provenance
 
-- Source commit: `4dab32a3ba35818114c0f6349342773e71a284d8`
-- Upstream tag: `MPCVR-Plus-2.5` (`8f1bf90e7c468e362e8b2d1be16ed4f664ea1f5a`)
-- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/41189687801
-- Publication reuses this successful build without rebuilding the filters.
+- Source commit: `5d129a52fbc7efc47ff6c5b23f7b8f1d56aa728a`
+- Upstream tag: `MPCVR-Plus-2.8` (`c9dc91b3f2736b8f955d56d3b9fca93123241792`)
+- Build: https://github.com/rampageX/MPCVR-Plus/actions/runs/42172338047
+- Publication reuses the successful build without rebuilding the filters.
 
 ## Package
 
-Includes Win32 and x64 filters, English documentation, build provenance and a SHA-256 package checksum. Existing limitations remain documented in OSD-PLUS.md.
+Includes Win32 and x64 filters, English documentation, build provenance and a SHA-256 package checksum.
+
+## Upstream limitations
+
+- Artifact removal and logo hiding apply to supported progressive planar Direct3D 11 video; unsupported formats pass through.
+- Logo hiding targets stationary logos.
+- Upstream recommends Windows hardware-accelerated GPU scheduling when using NVIDIA RTX Video Super Resolution or DLSS SR.
