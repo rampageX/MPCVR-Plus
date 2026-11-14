@@ -1,9 +1,9 @@
 {
-  "tag": "osd-v1.0.7",
+  "tag": "osd-v1.0.8",
   "publication_revision": 2,
-  "title": "MPCVR-Plus OSD v1.0.7",
-  "source_commit": "5d129a52fbc7efc47ff6c5b23f7b8f1d56aa728a",
-  "build_run": 42172338047,
-  "artifact_name": "MPCVR-Plus-OSD-5d129a52fbc7efc47ff6c5b23f7b8f1d56aa728a",
-  "asset_name": "MPCVR-Plus-OSD-v1.0.7.zip"
+  "title": "MPCVR-Plus OSD v1.0.8",
+  "source_commit": "b3e518d568595691c0c626f274aad8feec525dc3",
+  "build_run": 43594983307,
+  "artifact_name": "MPCVR-Plus-OSD-b3e518d568595691c0c626f274aad8feec525dc3",
+  "asset_name": "MPCVR-Plus-OSD-v1.0.8.zip"
 }
