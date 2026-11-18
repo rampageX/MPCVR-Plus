@@ -108,6 +108,7 @@ static const Toggle g_toggles[] = {
 	{ "Deblocking and debanding off",           [](Settings_t& s) { s.iDeblock = DEBLOCK_Off; s.bDeband = false; } },
 	{ "Chroma upsampling to RAVU-zoom",         [](Settings_t& s) { s.iChromaScaling = CHROMA_RAVU; } },
 	{ "Chroma upsampling to Jinc (EWA)",        [](Settings_t& s) { s.iChromaScaling = CHROMA_Jinc; } },
+	{ "Chroma upsampling to EWA Lanczos Sharp", [](Settings_t& s) { s.iChromaScaling = CHROMA_EwaLanczosSharp; } },
 	{ "Chroma upsampling to FSRCNNX 8 AR",      [](Settings_t& s) { s.iChromaScaling = CHROMA_FSRCNNX8AR; } },
 	{ "Replace VP chroma upsampling off",       [](Settings_t& s) { s.bVPReplaceChroma = false; } },
 	{ "Upscaling to ArtCNN C4F16 DS",           [](Settings_t& s) { s.iUpscaling = UPSCALE_ArtCNN; } },
@@ -116,6 +117,11 @@ static const Toggle g_toggles[] = {
 	{ "Super Resolution off",                   [](Settings_t& s) { s.bVPScaling = false; } },
 	{ "DLSS SR on",                             [](Settings_t& s) { s.bDlssSR = true; } },
 	{ "DLSS SR off",                            [](Settings_t& s) { s.bDlssSR = false; } },
+	{ "Cadence slips on a cut",                 [](Settings_t& s) { s.iCadenceSlips = CADENCE_SLIPS_OnCut; } },
+	{ "Cadence slips on a cut, else made",      [](Settings_t& s) { s.iCadenceSlips = CADENCE_SLIPS_OnCutOrMade; } },
+	{ "Cadence slips where they fall",          [](Settings_t& s) { s.iCadenceSlips = CADENCE_SLIPS_Off; } },
+	{ "Swap chain renewal off",                 [](Settings_t& s) { s.bSwapChainRenew = false; } },
+	{ "Swap chain renewal on",                  [](Settings_t& s) { s.bSwapChainRenew = true; } },
 };
 
 static int RunToggleSuite(HMODULE hFilter, HWND hwnd, SIZE source, SIZE window, int seconds)

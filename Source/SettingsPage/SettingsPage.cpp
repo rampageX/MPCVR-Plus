@@ -181,7 +181,8 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"Direct3D 11." },
 	{ IDC_COMBO1,
 		L"Bit depth of the pictures the renderer works on.\n"
-		"Auto: 10-bit for sources above 8 bits and with RTX Video HDR, 8-bit otherwise.\n"
+		"Auto: 16-bit float for HDR output (HDR video sent in HDR, and RTX Video HDR), 10-bit for "
+		"other sources above 8 bits, 8-bit otherwise.\n"
 		"DLSS 5 NR always works in 16-bit float, whatever is chosen here. RTX Video HDR does not "
 		"run in 8-bit." },
 	{ IDC_STATIC1,
@@ -220,8 +221,12 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		L"Rebuilds the colour (chroma) from 4:2:0 and 4:2:2 video to full resolution.\n"
 		"Used when the shaders convert the picture: formats unticked in Source, Dolby Vision, or "
 		"with the replacement below. Greyed while the video processor converts every format.\n"
-		"Listed from best to simplest. RAVU-zoom and FSRCNNX 8 AR need Direct3D 11 and 4:2:0 "
-		"video; Catmull-Rom is used otherwise." },
+		"Listed from best to simplest, as they measured on film along the edges, where colour "
+		"bleeds. EWA Lanczos Sharp, the default, EWA Ginseng and Jinc are within a few hundredths "
+		"of a decibel of one another; EWA Lanczos4 Sharpest keeps more colour overall and less at "
+		"the edges; RAVU-zoom is the one for drawn lines.\n"
+		"All but Catmull-Rom, Bilinear and Nearest-neighbor need Direct3D 11 and 4:2:0 video; "
+		"Catmull-Rom is used otherwise." },
 	{ IDC_CHECK27,
 		L"The shaders rebuild the colour with the method above, then hand the video processor a "
 		"full-resolution (4:4:4) picture, which it goes on converting and resizing. Better colour "
@@ -308,6 +313,11 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		L"Adds a very fine noise before output so that smooth gradients (skies, fades to black) "
 		"don't show banding.\n"
 		"Negligible cost: leave it on." },
+	{ IDC_DITHER_MOVING,
+		L"Moves that noise every picture instead of leaving it in place. The eye averages "
+		"several pictures, so a gradient then looks smoother still, with no fixed pattern; on a "
+		"still picture the noise can be seen to move up close.\n"
+		"Direct3D 11. Off by default." },
 	{ IDC_DEBLOCK,
 		L"Removes the 8x8 blocks and the ringing that strong compression leaves (DVDs, standard-"
 		"definition TV, XviD and DivX files), on the decoded picture before it is converted or resized.\n"
@@ -458,7 +468,9 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"HDR on, an NVIDIA RTX card, the 64-bit filter, Direct3D 11, a bit depth other than "
 		"8-bit (Source tab), and a format converted by the video processor. Applies to SDR "
 		"video only.\n"
-		"The statistics show a star (*) when it is really running." },
+		"The driver applies it only while the NVIDIA app has RTX Video HDR on, as bright as "
+		"the app's peak. The statistics show a star (*) when it is really running, what the "
+		"app is set to, and the peak the driver wrote." },
 	{ IDC_CHECK14,
 		L"When HDR video is not output in HDR (SDR display, Windows HDR off, or HDR output set to "
 		"Off), converts it to SDR so that it doesn't look washed out." },
@@ -474,6 +486,14 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 	{ IDC_SLIDER2,
 		L"Target brightness of that conversion, in nits (25 to 400). Applies while you drag, so "
 		"you can judge it on the picture." },
+	{ IDC_SDR_PEAK_CUTS,
+		L"The measured peak (Measured peak, beside it, and the Measured method of the conversion "
+		"to SDR, on the right) is smoothed over three seconds so that the picture does not pump. With this, a "
+		"jump in the picture's mean brightness is taken for a scene cut and the smoothing starts "
+		"over: the new scene's peak is used from its first picture instead of after about 60, and "
+		"its highlights are not clipped meanwhile. A flash or a fast fade can be taken for a cut "
+		"too.\n"
+		"Available while one of the two is in use. Not carried by the presets." },
 
 	// Presentation
 	{ IDC_COMBO4,
@@ -503,6 +523,35 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"Resolution). Without it a picture reaches the screen a refresh or two after its time.\n"
 		"The statistics then show 'scheduled', and how many pictures were repeated or dropped.\n"
 		"Needs Direct3D 11 and the Flip swap effect (always used for HDR)." },
+	{ IDC_GROUP_WORKAROUNDS,
+		L"Fixes for what the screen or Windows impose on a film, beyond the renderer's own timing. "
+		"They need Render ahead." },
+	{ IDC_CADENCE_CUT,
+		L"A 23.976 fps film cannot be shared out evenly on a 60Hz screen: every 8 seconds two "
+		"pictures in a row stay three refreshes instead of three then two, a small hiccup in the "
+		"motion. 29.97 and 59.94 fps do the same every 17 seconds. No renderer can avoid it, only "
+		"choose where it goes.\n"
+		"Ticked, it waits for the next change of shot, a few seconds at most, and puts the hiccup "
+		"there, where it is not seen; a picture is then never more than about 13 ms off its time.\n"
+		"It only runs where hiccups come that often: 23.976, 29.97 and 59.94 fps on a 60Hz screen "
+		"(and on 120 or 144Hz), a 23.976 fps film on a 24Hz screen and 24 fps on 23.976Hz (one "
+		"every 42 seconds). Anywhere else -- 24 fps on 60Hz, 25 on 50Hz, a film at the screen's own "
+		"rate -- nothing is copied or measured, and the hiccup that a drift of the clocks brings "
+		"once an hour or so goes where it falls." },
+	{ IDC_CADENCE_MADE,
+		L"When no change of shot comes in time, the hiccup's extra refresh shows a frame "
+		"interpolated between the two pictures (EchoFG) instead of holding one.\n"
+		"It costs the GPU about as much as a picture, once every few seconds, and asks for each "
+		"picture earlier while it waits. A frame not ready in time falls back to the plain hiccup. "
+		"Needs Direct3D feature level 11_1." },
+	{ IDC_SWAPCHAIN_RENEW,
+		L"A bug in Windows, not in the renderer nor in the NVIDIA driver: after a while at "
+		"23.976Hz (often half an hour), Windows' graphics kernel loses its count of the screen's "
+		"refreshes and holds every picture to 1/23 s. The film then stutters about once a second "
+		"until it is restarted.\n"
+		"Ticked, the renderer notices pictures shown late although they were ready, and rebuilds "
+		"its swap chain, which clears it: a few pictures lost once. Unticked, the stutter stays as "
+		"Windows leaves it." },
 	{ IDC_CHECK2,
 		L"Shows the renderer's statistics over the picture: formats, processing steps and their "
 		"cost, sync offset.\n"
@@ -660,7 +709,7 @@ void CVRSettingsPPage::FillCombos()
 	Send(IDC_COMBO6, CB_ADDSTRING, 0, (LPARAM)L"Fixed size");
 	Send(IDC_COMBO6, CB_ADDSTRING, 0, (LPARAM)L"Grow with the window");
 
-	Combo_AddData(Item(IDC_COMBO1), L"Auto (8 or 10-bit)",  0);
+	Combo_AddData(Item(IDC_COMBO1), L"Auto",                0);
 	Combo_AddData(Item(IDC_COMBO1), L"8-bit",               8);
 	Combo_AddData(Item(IDC_COMBO1), L"10-bit",             10);
 	Combo_AddData(Item(IDC_COMBO1), L"16-bit float",       16);
@@ -685,8 +734,11 @@ void CVRSettingsPPage::FillCombos()
 	// brought from 1080p to 4K (tools/dlssnr_probe, --tchroma and --tupscale, the
 	// tables in README-DLSS5.md). The number each entry carries is what is saved, so
 	// the order can change without moving anybody's setting.
+	Combo_AddData(Item(IDC_COMBO5), L"EWA Lanczos Sharp",  CHROMA_EwaLanczosSharp);
+	Combo_AddData(Item(IDC_COMBO5), L"EWA Ginseng",        CHROMA_EwaGinseng);
 	Combo_AddData(Item(IDC_COMBO5), L"Jinc (EWA)",         CHROMA_Jinc);
 	Combo_AddData(Item(IDC_COMBO5), L"RAVU-zoom",          CHROMA_RAVU);
+	Combo_AddData(Item(IDC_COMBO5), L"EWA Lanczos4 Sharpest", CHROMA_EwaLanczos4Sharpest);
 	Combo_AddData(Item(IDC_COMBO5), L"Catmull-Rom",        CHROMA_CatmullRom);
 	Combo_AddData(Item(IDC_COMBO5), L"FSRCNNX 8 AR",       CHROMA_FSRCNNX8AR);
 	Combo_AddData(Item(IDC_COMBO5), L"Bilinear",           CHROMA_Bilinear);
@@ -696,6 +748,7 @@ void CVRSettingsPPage::FillCombos()
 	// enlargements.
 	for (const int id : { IDC_COMBO2, IDC_COMBO16 }) {
 		Combo_AddData(Item(id), L"ArtCNN C4F16 DS",    UPSCALE_ArtCNN);
+		Combo_AddData(Item(id), L"Anime4K CNN x2 M AR", UPSCALE_Anime4KAR);
 		Combo_AddData(Item(id), L"RAVU-zoom",          UPSCALE_RAVUZoom);
 		Combo_AddData(Item(id), L"FSRCNNX 16 AR",      UPSCALE_FSRCNNX16AR);
 		Combo_AddData(Item(id), L"FSRCNNX 8 AR",       UPSCALE_FSRCNNX8AR);
@@ -861,6 +914,7 @@ void CVRSettingsPPage::SetControls()
 	Send(IDC_SHARPEN_LEVEL, TBM_SETPOS, 1, m_SetsPP.iSharpenLevel);
 	SetText(IDC_SHARPEN_LEVEL_TEXT, std::to_wstring(m_SetsPP.iSharpenLevel).c_str());
 	SetCheck(IDC_CHECK10, m_SetsPP.bUseDither);
+	SetCheck(IDC_DITHER_MOVING, m_SetsPP.bDitherMoving);
 	Combo_SelectData(Item(IDC_DEBLOCK), m_SetsPP.iDeblock);
 	Send(IDC_DEBLOCK_LEVEL, TBM_SETPOS, 1, m_SetsPP.iDeblockLevel);
 	SetText(IDC_DEBLOCK_LEVEL_TEXT, std::to_wstring(m_SetsPP.iDeblockLevel).c_str());
@@ -883,6 +937,7 @@ void CVRSettingsPPage::SetControls()
 	SetCheck(IDC_CHECK18, m_SetsPP.bHdrPreferDoVi);
 	SetCheck(IDC_CHECK14, m_SetsPP.bConvertToSdr);
 	Combo_SelectData(Item(IDC_COMBO_SDRTM), m_SetsPP.iSdrToneMappingType);
+	SetCheck(IDC_SDR_PEAK_CUTS, m_SetsPP.bSdrPeakSceneCuts);
 	SetCheck(IDC_CHECK19, m_SetsPP.bVPRTXVideoHDR);
 	Send(IDC_COMBO7, CB_SETCURSEL, m_SetsPP.iHdrToggleDisplay, 0);
 	Send(IDC_SLIDER1, TBM_SETPOS, 1, m_SetsPP.iHdrOsdBrightness);
@@ -897,6 +952,9 @@ void CVRSettingsPPage::SetControls()
 	SetCheck(IDC_CHECK13, m_SetsPP.bAdjustPresentTime);
 	SetCheck(IDC_CHECK16, m_SetsPP.bReinitByDisplay);
 	SetCheck(IDC_CHECK26, m_SetsPP.bDlssRenderAhead);
+	SetCheck(IDC_CADENCE_CUT, m_SetsPP.iCadenceSlips != CADENCE_SLIPS_Off);
+	SetCheck(IDC_CADENCE_MADE, m_SetsPP.iCadenceSlips == CADENCE_SLIPS_OnCutOrMade);
+	SetCheck(IDC_SWAPCHAIN_RENEW, m_SetsPP.bSwapChainRenew);
 	Send(IDC_COMBO6, CB_SETCURSEL, m_SetsPP.iResizeStats, 0);
 	Send(IDC_SLIDER8, TBM_SETPOS, TRUE, (LPARAM)(m_SetsPP.iVideoDelay / VIDEO_DELAY_STEP));
 	SetText(IDC_EDIT10, DelayText(m_SetsPP.iVideoDelay).c_str());
@@ -964,7 +1022,13 @@ void CVRSettingsPPage::EnableControls()
 		for (const int id : { IDC_CHECK20, IDC_STATIC_DVTM, IDC_COMBO_DVTM }) {
 			Enable(id, bLocal);
 		}
+		// The start over at a scene cut serves both measurements: the tone mapping's, and
+		// the conversion to SDR's, which Direct3D 9 has as well.
+		Enable(IDC_SDR_PEAK_CUTS, (bLocal && m_SetsPP.bHdrLocalMeasurePeak)
+			|| (m_SetsPP.bConvertToSdr && m_SetsPP.iSdrToneMappingType == SDRTM_Measured));
 	}
+	// Moving the dither's pattern is the Direct3D 11 final pass's.
+	Enable(IDC_DITHER_MOVING, m_SetsPP.bUseD3D11 && m_SetsPP.bUseDither);
 
 	// The ones that decide each other, worked out in Greying.h so the bench can put
 	// the same question to them without a film and without a page.
@@ -1025,6 +1089,12 @@ void CVRSettingsPPage::EnableControls()
 	const BOOL bUpstreamTiming = !(m_SetsPP.bUseD3D11 && m_SetsPP.bDlssRenderAhead);
 	Enable(IDC_CHECK15, bUpstreamTiming);
 	Enable(IDC_CHECK13, bUpstreamTiming);
+	// The workarounds are render ahead's: its schedule places the cadence's hiccup and
+	// sees the pictures Windows holds back.
+	Enable(IDC_GROUP_WORKAROUNDS, !bUpstreamTiming);
+	Enable(IDC_CADENCE_CUT, !bUpstreamTiming);
+	Enable(IDC_CADENCE_MADE, !bUpstreamTiming && m_SetsPP.iCadenceSlips != CADENCE_SLIPS_Off);
+	Enable(IDC_SWAPCHAIN_RENEW, !bUpstreamTiming);
 
 	// DLSS. The path boxes stay live even when the feature is off, so a wrong path
 	// can be fixed without enabling it first.
@@ -1317,6 +1387,18 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 			return (INT_PTR)1;
 		}
 
+		if (action == BN_CLICKED && (nID == IDC_CADENCE_CUT || nID == IDC_CADENCE_MADE)) {
+			// Two boxes for the one setting: off, on a change of shot, or that and else a frame made.
+			const int value = !Checked(IDC_CADENCE_CUT) ? CADENCE_SLIPS_Off
+				: Checked(IDC_CADENCE_MADE) ? CADENCE_SLIPS_OnCutOrMade : CADENCE_SLIPS_OnCut;
+			if (value != m_SetsPP.iCadenceSlips) {
+				m_SetsPP.iCadenceSlips = value;
+				SetDirty();
+			}
+			EnableControls();
+			return (INT_PTR)1;
+		}
+
 		if (action == BN_CLICKED) {
 			// bEnables: the box decides whether other controls still serve.
 			const struct { int id; bool* pValue; bool bEnables; } checks[] = {
@@ -1328,7 +1410,8 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_CHECK7,  &m_SetsPP.VPFmts.bNV12,         true  },
 				{ IDC_CHECK8,  &m_SetsPP.VPFmts.bP01x,         true  },
 				{ IDC_CHECK9,  &m_SetsPP.VPFmts.bYUY2,         true  },
-				{ IDC_CHECK10, &m_SetsPP.bUseDither,           false },
+				{ IDC_CHECK10, &m_SetsPP.bUseDither,           true  },
+				{ IDC_DITHER_MOVING, &m_SetsPP.bDitherMoving,  false },
 				{ IDC_DEBAND,  &m_SetsPP.bDeband,              true  },
 				{ IDC_HIDE_LOGO, &m_SetsPP.bHideLogo,          true  },
 				{ IDC_CHECK11, &m_SetsPP.bExclusiveFS,         false },
@@ -1339,7 +1422,8 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_CHECK17, &m_SetsPP.bDeintBlend,          false },
 				{ IDC_CHECK18, &m_SetsPP.bHdrPreferDoVi,       false },
 				{ IDC_CHECK19, &m_SetsPP.bVPRTXVideoHDR,       false },
-				{ IDC_CHECK20, &m_SetsPP.bHdrLocalMeasurePeak, false },
+				{ IDC_CHECK20, &m_SetsPP.bHdrLocalMeasurePeak, true  },
+				{ IDC_SDR_PEAK_CUTS, &m_SetsPP.bSdrPeakSceneCuts, false },
 				{ IDC_DLSSNR_ENABLE, &m_SetsPP.bDlssNR,        true  },
 				{ IDC_CHECK21, &m_SetsPP.bDlssNRAutoMask,      false },
 				{ IDC_CHECK23, &m_SetsPP.bDlssNRAfterUpscale,  false },
@@ -1348,6 +1432,7 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_CHECK29, &m_SetsPP.bUpscalingSmall,      true  },
 				{ IDC_CHECK26, &m_SetsPP.bDlssRenderAhead,     true  },
 				{ IDC_CHECK27, &m_SetsPP.bVPReplaceChroma,     true  },
+				{ IDC_SWAPCHAIN_RENEW, &m_SetsPP.bSwapChainRenew, false },
 			};
 			for (const auto& c : checks) {
 				if (nID == c.id) {
@@ -1460,7 +1545,7 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_COMBO13, &m_SetsPP.iDlssNRToggleKey, false },
 				{ IDC_COMBO15, &m_SetsPP.iDlssSRPreset,    false },
 				{ IDC_COMBO_DVTM,  &m_SetsPP.iHdrDoviToneMappingType, false },
-				{ IDC_COMBO_SDRTM, &m_SetsPP.iSdrToneMappingType,     false },
+				{ IDC_COMBO_SDRTM, &m_SetsPP.iSdrToneMappingType,     true  },
 				{ IDC_DEBLOCK,     &m_SetsPP.iDeblock,                true  },
 			};
 			for (const auto& c : byData) {

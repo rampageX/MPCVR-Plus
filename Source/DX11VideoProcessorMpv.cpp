@@ -41,6 +41,7 @@ const MpvShaderInfo* MpvLumaShader(const int upscaling)
 	case UPSCALE_FSRCNNX16AR: return &kMpvFSRCNNX16;
 	case UPSCALE_RAVUZoom:    return &kMpvRavuZoomAR3;
 	case UPSCALE_ArtCNN:      return &kMpvArtCNNC4F16DS;
+	case UPSCALE_Anime4KAR:   return &kMpvAnime4KCNNx2M;
 	default:                  return nullptr;
 	}
 }
@@ -57,9 +58,12 @@ static const MpvShaderInfo* MpvChromaShader(const int chromaScaling)
 	}
 }
 
+// Anime4K only comes held to the source's range: at twice the size it measured 0.4 dB
+// better so on a clean picture, 0.1 on a compressed one and 0.03 worse on grain
+// (dlssnr_harness --tupscale, ten film frames).
 static bool MpvLumaAntiRing(const int upscaling)
 {
-	return upscaling == UPSCALE_FSRCNNX8AR || upscaling == UPSCALE_FSRCNNX16AR;
+	return upscaling == UPSCALE_FSRCNNX8AR || upscaling == UPSCALE_FSRCNNX16AR || upscaling == UPSCALE_Anime4KAR;
 }
 
 static bool MpvChromaAntiRing(const int chromaScaling)
@@ -419,6 +423,9 @@ const wchar_t* CDX11VideoProcessor::ChromaScalingName() const
 	case CHROMA_Bilinear:   return L"Bilinear";
 	case CHROMA_CatmullRom: return L"Catmull-Rom";
 	case CHROMA_Jinc:       return L"Jinc (EWA)";
+	case CHROMA_EwaLanczosSharp:     return L"EWA Lanczos Sharp";
+	case CHROMA_EwaLanczos4Sharpest: return L"EWA Lanczos4 Sharpest";
+	case CHROMA_EwaGinseng:          return L"EWA Ginseng";
 	case CHROMA_RAVU:       return m_bMpvChromaActive ? L"RAVU-zoom" : L"Catmull-Rom";
 	case CHROMA_FSRCNNX8AR: return m_bMpvChromaActive ? L"FSRCNNX 8 AR" : L"Catmull-Rom";
 	}

@@ -53,6 +53,11 @@ enum :int {
 	// the property page shows them in is the measured one, not this one.
 	CHROMA_Jinc,       // ewa jinc, radius 3.2383, jinc-windowed: what madVR calls Jinc
 	CHROMA_FSRCNNX8AR, // FSRCNNX 8 on Cb and Cr with anti-ringing; Catmull-Rom elsewhere
+	// Three of libplacebo's polar kernels beside the Jinc, as its filters.c defines them and as
+	// they measured through the filter: Direct3D 11 and 4:2:0 in planes, Catmull-Rom elsewhere.
+	CHROMA_EwaLanczosSharp,     // ewa_lanczossharp: the Jinc blurred by 0.981 (the default)
+	CHROMA_EwaLanczos4Sharpest, // ewa_lanczos4sharpest: four lobes, blurred by 0.885, anti-ringing 0.8
+	CHROMA_EwaGinseng,          // ewa_ginseng: jinc windowed by a sinc
 	CHROMA_COUNT
 };
 
@@ -71,6 +76,7 @@ enum :int {
 	UPSCALE_FSRCNNX8AR,   // the same networks, held to the range the source covers
 	UPSCALE_FSRCNNX16AR,
 	UPSCALE_ArtCNN,       // ArtCNN C4F16 DS: compute passes, denoises as it enlarges
+	UPSCALE_Anime4KAR,    // Anime4K CNN x2 M on the luma given as grey, held to the source's range
 	UPSCALE_COUNT
 };
 
@@ -115,7 +121,8 @@ enum :int {
 	SDRTM_COUNT
 };
 
-// Tuning of SDRTM_Measured. Registry only: SdrPeakWindowMs, SdrPeakFloorNits and SdrPeakSceneCuts.
+// Tuning of SDRTM_Measured. Registry only: SdrPeakWindowMs and SdrPeakFloorNits. SdrPeakSceneCuts,
+// registry only upstream, is on the HDR tab here; none of the three is carried by a preset.
 #define SDR_PEAK_WINDOW_DEF 3000 // ms
 #define SDR_PEAK_WINDOW_MIN    0
 #define SDR_PEAK_WINDOW_MAX 10000
@@ -214,6 +221,16 @@ constexpr inline auto CLEAN_LEVEL_DEF = 3;
 constexpr inline auto LOGO_MARGIN_MIN = 0;
 constexpr inline auto LOGO_MARGIN_MAX = 3;
 constexpr inline auto LOGO_MARGIN_DEF = 1;
+
+// Where a cadence slips (Settings_t::iCadenceSlips): as it falls, on a scene cut, or on a
+// scene cut and else covered by a picture made between two. The values are
+// CPresentSchedule::CadenceSlips'.
+enum : int {
+    CADENCE_SLIPS_Off = 0,
+    CADENCE_SLIPS_OnCut,
+    CADENCE_SLIPS_OnCutOrMade,
+    CADENCE_SLIPS_COUNT
+};
 
 // The picture delay, in milliseconds. Later is what a slow sound asks for; earlier is
 // there for a television that takes longer over the picture than the sound takes to
@@ -355,6 +372,21 @@ struct Settings_t {
 	// smeared further than the analysis saw.
 	int  iLogoMargin;
 
+	// The refresh more a film at 23.976, 29.97 or 59.94 pictures a second owes a screen at
+	// 60 Hz every few seconds, and the repeat or the drop a film at the screen's own rate
+	// owes it once in a long while, CADENCE_SLIPS_*: where they fall, held for a scene cut,
+	// or held for one and else shown as a picture EchoFG makes between the two. Direct3D 11
+	// and render ahead, which schedules every picture.
+	int  iCadenceSlips;
+	// Windows' own stutter at 23.976 Hz (its graphics kernel holding every flip to 1/23 s):
+	// the swap chain rebuilt when pictures ready in time are shown late. Render ahead.
+	bool bSwapChainRenew;
+
+	// The dither's pattern moved each picture rather than left where it is, so that a
+	// still gradient is averaged by the eye over several thresholds at every pixel.
+	// Direct3D 11.
+	bool bDitherMoving;
+
 	Settings_t() {
 		SetDefault();
 	}
@@ -380,7 +412,7 @@ struct Settings_t {
 		bVPReplaceChroma                = false;
 		iSharpen                        = SHARPEN_Disabled;
 		iSharpenLevel                   = SHARPEN_LEVEL_DEF;
-		iChromaScaling                  = CHROMA_CatmullRom;
+		iChromaScaling                  = CHROMA_EwaLanczosSharp;
 		iUpscaling                      = UPSCALE_Jinc2;
 		iDownscaling                    = DOWNSCALE_Hamming;
 		bInterpolateAt50pct             = true;
@@ -449,6 +481,9 @@ struct Settings_t {
 		iDebandLevel                    = CLEAN_LEVEL_DEF;
 		bHideLogo                       = false;
 		iLogoMargin                     = LOGO_MARGIN_DEF;
+		iCadenceSlips                   = CADENCE_SLIPS_Off;
+		bSwapChainRenew                 = true;
+		bDitherMoving                   = false;
 	}
 };
 
@@ -481,7 +516,9 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 
 // What a preset does not carry, because it belongs to the installation, the room or the
 // screen rather than to a taste: where the two DLLs are, the DLSS toggle key, how late the
-// room's sound is, the Measured method's tuning (registry only, as upstream has it),
+// room's sound is, the Measured method's tuning (registry only, as upstream has it, but
+// for the start over at a scene cut, which is on the HDR tab: a preset saved before it
+// was there would turn it off),
 // whether the statistics are up, and the whole of the Presentation tab. Presets saved by
 // earlier versions hold a Discard swap effect and the wait for a vertical blank, and
 // recalling one turned the scheduled presentation off for every SDR picture.
@@ -501,6 +538,8 @@ inline void KeepOutOfPreset(Settings_t& sets, const Settings_t& current)
 	sets.bAdjustPresentTime   = current.bAdjustPresentTime;
 	sets.bReinitByDisplay     = current.bReinitByDisplay;
 	sets.bDlssRenderAhead     = current.bDlssRenderAhead;
+	sets.iCadenceSlips        = current.iCadenceSlips;
+	sets.bSwapChainRenew      = current.bSwapChainRenew;
 }
 
 constexpr int PRESET_COUNT = 10;

@@ -37,7 +37,12 @@
 #include "DLSS/DlssNR.h"
 #include "DLSS/DlssSR.h"
 #include "DLSS/DlssTiming.h"
+#include "DLSS/DwmKeepAlive.h"
+#include "Cadence/SceneCut.h"
+#include "FrameGen/echo/EchoFlow.h"
+#include "FrameGen/echo/EchoSynth11.h"
 #include "Upscale/MpvShader.h"
+#include "NvidiaAppSettings.h"
 #include "VideoProcessor.h"
 #include "SubPic/DX11SubPic.h"
 
@@ -113,9 +118,14 @@ private:
 	CComPtr<ID3D11Buffer>               m_pHdrStateStaging; // for the statistics only
 	bool  m_bSdrMeasureActive     = false; // the measuring variant of the correction shader is in use
 	bool  m_bHdrLocalMeasureActive = false; // the measuring variant of the local tone mapping shader is in use
+	// RTX Video HDR's output is measured for the statistics, while they are shown: what
+	// the driver wrote, which nothing else in the renderer reads.
+	bool  m_bRtxHdrMeasureActive  = false;
 	bool  m_bHdrStatsCopyPending  = false;
 	float m_fHdrMeasuredPeakNits  = 0.0f;
 	float m_fHdrSmoothedPeakNits  = 0.0f;
+	float m_fHdrMeasuredAvgNits   = 0.0f;
+	CNvidiaAppSettings m_NvidiaApp; // what the NVIDIA app has the driver do with RTX Video
 
 	struct HdrMeasureConstants_t {
 		UINT rectOrigin[2];
@@ -240,6 +250,12 @@ private:
 	// statistics carry it because a picture that stops reaching the screen looks
 	// like nothing at all from inside the renderer.
 	int m_nSwapChainResizeFailed = 0;
+	// Renewed because its flips had begun to be held back (CPresentSchedule::kStuckRun), and
+	// when; given up when that came back within a minute, until the next swap chain.
+	int m_nSwapChainRenewed = 0;
+	uint64_t m_tickSwapChainRenewed = 0;
+	bool m_bSwapChainRenewGivenUp = false;
+	void RenewSwapChainIfStuck();
 
 	// Sharpening, a step of the post-scale chain: the method, which of the five
 	// levels, and the shader that does it.
@@ -255,6 +271,13 @@ private:
 		return m_bFinalPass && m_pPSSharpen && m_pPSSharpenDither && m_pPostScaleShaders.empty() && !m_pPSHalfOUtoInterlace;
 	}
 	void UpdateSharpenDitherShader();
+
+	// Where the dither's pattern starts for the picture being finished: the pattern
+	// moved each picture with Settings_t::bDitherMoving, where it is otherwise.
+	UINT m_nDitherPicture = 0;
+	REFERENCE_TIME m_rtDitherPicture = 0;   // the picture it was moved for
+	bool m_bDitherPictureKnown = false;
+	void NextDitherOffset(float& x, float& y);
 
 	bool m_bVPReplaceChroma = false;    // the setting
 	bool m_bChromaReplacedVP = false;   // and the shaders rebuild this source's chroma
@@ -374,6 +397,7 @@ private:
 	void DrawNotice(ID3D11Texture2D* pRenderTarget);
 	UINT     m_uPresentQueue = 0;
 	uint64_t m_tickOnScreen = 0;        // GetPreciseTick() scale; 0 when DXGI would not say
+	unsigned m_offGridNoted = 0;        // DXGI's times off the refreshes, as last noted in the trace
 	REFERENCE_TIME m_rtOnScreenOffset = 0;
 	bool     m_bOnScreenKnown = false;
 	uint64_t m_tickPresentCall = 0;     // GetPreciseTick() just before Present was called
@@ -497,14 +521,77 @@ private:
 
 	// Each picture given a refresh in advance, and Present called in time for it.
 	CPresentSchedule m_PresentSchedule;
+	// DWM composing on every refresh while the film plays in a window (DwmKeepAlive.h).
+	CDwmKeepAlive m_DwmKeepAlive;
 	bool m_bScheduled = false;                // the last picture was
 	REFERENCE_TIME m_rtScheduledOffset = 0;   // its refresh, less its own time
 	void ReadPresentSchedule();
 	void WaitForScheduledPresent(const CPresentSchedule::Plan& plan, const bool bMeasure);
+	void WaitUntilTick(long long tick);
+
+	// The refresh a film at 23.976, 29.97 or 59.94 pictures a second owes a screen at
+	// 60 Hz now and then, and the repeat or the drop a film at the screen's own rate owes
+	// it once in a long while, placed on a scene cut, or shown as a picture made between
+	// two (CPresentSchedule::SetCadenceSlips, DX11VideoProcessorCadence.cpp).
+	int m_iCadenceSlips = CADENCE_SLIPS_Off;   // user setting
+	bool m_bSwapChainRenew = true;             // user setting: RenewSwapChainIfStuck may rebuild it
+	CSceneCut m_SceneCut;
+	CEchoFlow m_CadenceFlow;
+	CEchoSynth11 m_CadenceSynth;
+	Tex2D_t m_TexCadencePicture[2];            // the video area of the last two pictures, as drawn and before anything over it
+	Tex2D_t m_TexCadenceMade;                  // the picture made between them
+	CComPtr<ID3D11UnorderedAccessView> m_pCadenceMadeUav;
+	Tex2D_t m_TexCadenceKeep;                  // the drawn picture's back buffer, while the made one goes first
+	CRect m_cadenceRect;                       // the video area those were taken from
+	int m_iCadencePicture = 0;                 // which of the two holds the last picture
+	bool m_bCadenceHaveLast = false;           // it holds one
+	bool m_bCadenceWasActive = false;          // CadenceActive() at the last picture
+	bool m_bCadenceHaveBefore = false;         // and the other one holds the picture before it
+	bool m_bCadenceMeasured = false;           // the scene cut detector measured the last picture
+	bool m_bCadenceMakeReady = false;          // the motion and the synthesis can run
+	bool m_bCadenceMakeFailed = false;         // they could not be made: slips are plain, as option 2
+	uint64_t m_cadenceId = 0;                  // the last picture measured
+	float m_cadenceEchoMs[5] = {};             // what EchoFG took the GPU, the last five times it ran
+	int m_cadenceEchoCount = 0, m_cadenceEchoNext = 0;
+	CComPtr<ID3D11Query> m_pCadenceTiming[3];  // disjoint, before EchoFG, after it
+	bool m_bCadenceTimingPending = false;
+	// The GPU's pace: the copy and the detector of each picture, timed while made pictures may
+	// be wanted, and what it was when each of EchoFG's times was measured (CadenceEchoMs).
+	CComPtr<ID3D11Query> m_pCadenceProbe[3];   // disjoint, before the copy, after the detector
+	bool m_bCadenceProbePending = false;
+	float m_cadenceProbeMs[5] = {};
+	int m_cadenceProbeCount = 0, m_cadenceProbeNext = 0;
+	float m_cadenceEchoProbe[5] = {};          // the probe when m_cadenceEchoMs[i] was timed; 0, none
+	long long m_cadenceMadeRt = 0;             // the last made picture's time, for its line in the trace
+	unsigned m_cadenceMadeLate = 0;            // made pictures the GPU had not finished by their Present, left out
+	CComPtr<ID3D11Query> m_pCadenceDrawnQuery; // whether the GPU is done with the drawn picture, then with the made one
+	bool m_bCadenceMadeQueued = false;         // the last picture had one made, shown or not: its GPU time is not a drawn picture's
+	double CadenceEchoMs() const;
+	double CadenceProbeMs() const;
+	void CadenceReadTiming();
+	void CadenceReadProbe();
+	bool CadenceMake(float t, bool bTime);
+	std::atomic<int> m_cadenceAhead = 0;       // how much earlier samples are asked for so that one can be made, 100 ns
+	unsigned m_cadenceMadeFailed = 0;          // forced slips a made picture could not be had for
+	// MPCVR_CADENCE_DUMP: the first made pictures kept with the two they were made between
+	Tex2D_t m_TexCadenceDump[3];
+	bool m_bCadenceDumpPending = false;
+	unsigned m_cadenceDumped = 0;
+	void CadenceWriteDump();
+	bool CadenceActive() const;
+	UINT CadenceEncoding() const;
+	void CadenceTakePicture(ID3D11Texture2D* pBackBuffer);
+	int CadenceReadCut(CPacingTrace::Picture* pTraced);
+	bool CadencePresentMade(const CPresentSchedule::Plan& plan, CComPtr<ID3D11Texture2D>& pBackBuffer, bool bMeasure, bool bTrace, const CPacingTrace::Picture& traced);
+	void CadenceUpdateAhead();
+	void CadenceReset();
+	void CadenceRelease();
+	void DrawOverlays(ID3D11Texture2D* pBackBuffer, HRESULT& hr);
 
 	// Every picture's way to the screen, written to a file when one is asked for.
 	CPacingTrace m_PacingTrace;
 	CCutReadback m_SRCutReadback;       // what DLSS SR's cut detection said of each picture, for it
+	CCutReadback m_HdrTraceReadback;    // and the HDR peak measurement
 	bool m_bSkipNextSample = false;     // the schedule asked for the next sample to be left out undrawn
 	std::wstring m_strTraceNote;
 	std::wstring m_strTraceDlss;

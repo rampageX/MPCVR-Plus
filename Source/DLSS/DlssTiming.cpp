@@ -138,7 +138,11 @@ static double TicksPerMs()
 
 void CPresentSchedule::Reset()
 {
+	const int cadenceSlips = m_cadenceSlips;
+	const unsigned timesOffGrid = m_timesOffGrid;
 	*this = CPresentSchedule();
+	m_cadenceSlips = cadenceSlips;
+	m_timesOffGrid = timesOffGrid;
 }
 
 void CPresentSchedule::Flush()
@@ -147,6 +151,19 @@ void CPresentSchedule::Flush()
 	m_sinceFlush = 0;
 	m_dropRun = 0;
 	m_bDue = false;
+	m_lastGap = 0;
+	m_bSlipWaiting = false;
+	m_bSlipNext = false;
+}
+
+void CPresentSchedule::SetCadenceSlips(const int mode)
+{
+	const int clamped = std::clamp(mode, (int)CadenceSlipsWhereTheyFall, (int)CadenceSlipsOnCutOrMade);
+	if (clamped != m_cadenceSlips) {
+		m_cadenceSlips = clamped;
+		m_bSlipWaiting = false;
+		m_bSlipNext = false;
+	}
 }
 
 long long CPresentSchedule::SmoothDue(long long tickStamp, double frameMs)
@@ -192,27 +209,98 @@ bool CPresentSchedule::Ready(long long tickNow) const
 	return m_bClock && m_period > 0 && tickNow - m_anchorTick < (long long)(2000.0 * TicksPerMs());
 }
 
-void CPresentSchedule::Seen(unsigned lastPresent, const DXGI_FRAME_STATISTICS& stats, double nominalPeriodMs)
+int CPresentSchedule::Seen(unsigned lastPresent, const DXGI_FRAME_STATISTICS& stats, double nominalPeriodMs)
 {
 	if (!stats.SyncQPCTime.QuadPart || nominalPeriodMs <= 0) {
-		return;
+		return 0;
 	}
 	const double nominal = nominalPeriodMs * TicksPerMs();
 	const long long tick = stats.SyncQPCTime.QuadPart;
+	int astray = 0;
 
 	if (m_bClock && nominalPeriodMs != m_nominalMs) {
 		Reset(); // another display mode
 	}
+	bool bShownSure = true;   // the refresh this reading puts the last Present on can be relied on
 	if (m_bClock && stats.SyncRefreshCount != m_lastSync) {
-		const int step = (int)(stats.SyncRefreshCount - m_lastSync);
-		// A count that goes backwards, or a time that is not where that many refreshes
-		// put it, is another count altogether.
-		if (step < 0 || std::abs((double)(tick - m_anchorTick) - step * m_period) > 0.5 * m_period) {
+		// The refresh count and its time, each against the grid of refreshes found so far.
+		// Either can go astray on its own, and the one that agrees with the grid is gone by:
+		//
+		// - The count, its time on the grid. In MPC-HC at 60 Hz on an RTX 4060, full screen,
+		//   it lost a refresh five times in one second and kept that offset for the minute
+		//   and a half that followed, its times exact all along. Taken for another count
+		//   altogether, each reset the schedule, its cadence and the queue's depth with it,
+		//   and the screen showed a second of 3,3s and 2,2s. A count off the grid by the same
+		//   refreshes twice in a row is taken as astray and the times are gone by; once, it
+		//   may be a time that happens to fall a whole refresh late.
+		// - The time, its count right. In a window composed by the desktop, the same machine
+		//   gave a third of its times 1 to 16 ms after the refresh its count named, in runs
+		//   of up to forty readings: the moment the desktop composed, not the refresh. Each
+		//   taken as the grid moved the refreshes the schedule aims at by as much, pictures
+		//   went on the wrong refresh, and the statistics' graph showed it. Such a time is
+		//   left out, the count followed and the grid kept; kRegrid in a row off it by the
+		//   same amount are the refreshes truly moved, and the grid moves with them.
+		//
+		// A count that goes back, or a time neither on the grid nor where its count puts it
+		// give or take a refresh, is another count altogether: the schedule starts again.
+		const long long step = (long long)(int)(stats.SyncRefreshCount - m_lastSync);
+		const double periods = (double)(tick - m_anchorTick) / m_period;
+		const long long whole = std::llround(periods);
+		const double phase = periods - (double)whole;
+		const double tol = std::max(kOnGridPhase, kOnGridMinMs * TicksPerMs() / m_period);
+		const bool bOnGrid = std::abs(phase) < tol;
+		long long advance = -1;   // refreshes the anchor moves on; -1: start again
+		bool bTimed = false;      // the anchor takes this reading's time
+		if (step < 0) {
+			advance = -1;
+		} else if (bOnGrid && whole == step) {
+			advance = step;
+			bTimed = true;
+			m_bCountDoubt = false;
+			m_offGridRun = 0;
+		} else if (bOnGrid) {
+			m_offGridRun = 0;
+			if (m_bCountDoubt && whole - step == m_countDoubtBy) {
+				advance = whole;
+				bTimed = true;
+				astray = (int)(step - whole);
+				m_bCountDoubt = false;
+			} else {
+				// Once: the anchor stays where it was, the count is not taken yet.
+				m_bCountDoubt = true;
+				m_countDoubtBy = whole - step;
+				advance = 0;
+				bShownSure = false;
+			}
+		} else if (periods - (double)step > -0.5 && periods - (double)step < 1.5) {
+			m_bCountDoubt = false;
+			m_timesOffGrid++;
+			if (m_offGridRun > 0 && std::abs(phase - m_offGridPhase) < tol) {
+				m_offGridRun++;
+			} else {
+				m_offGridRun = 1;
+				m_offGridPhase = phase;
+			}
+			advance = step;
+			bTimed = m_offGridRun >= kRegrid;   // the refreshes moved: the grid follows
+			if (bTimed) {
+				advance = whole;
+				m_offGridRun = 0;
+			}
+		}
+		if (advance < 0) {
 			Reset();
+		} else if (advance == 0 && !bTimed) {
+			// The count not taken: read again from the same anchor.
 		} else {
-			m_anchorIndex += step;
-			m_anchorTick = tick;
+			m_anchorIndex += advance;
+			m_anchorTick = bTimed ? tick : m_anchorTick + std::llround((double)advance * m_period);
 			m_lastSync = stats.SyncRefreshCount;
+			if (bTimed && m_offGridRun == 0 && std::abs(phase) >= tol) {
+				// A grid moved: the period is measured afresh from here.
+				m_baseIndex = m_midIndex = m_anchorIndex;
+				m_baseTick = m_midTick = m_anchorTick;
+			}
 			// The period, over the last four to eight seconds of refreshes: successive
 			// times are good to a few microseconds, and the display mode's own figure
 			// is off by tens of parts in a million.
@@ -242,9 +330,9 @@ void CPresentSchedule::Seen(unsigned lastPresent, const DXGI_FRAME_STATISTICS& s
 		m_lastSync = stats.SyncRefreshCount;
 	}
 
-	// Which Present reached the screen, and on which refresh.
+	// Which Present reached the screen, and on which refresh: not from a count in doubt.
 	const long long shownOn = m_anchorIndex + (int)(stats.PresentRefreshCount - stats.SyncRefreshCount);
-	for (int i = 0; i < m_nPending; i++) {
+	for (int i = 0; i < m_nPending && bShownSure; i++) {
 		if (m_pending[i].id != stats.PresentCount) {
 			continue;
 		}
@@ -257,6 +345,9 @@ void CPresentSchedule::Seen(unsigned lastPresent, const DXGI_FRAME_STATISTICS& s
 		m_shownOffsetMs = (double)(RefreshTime(shownOn) - shown.tickDue) / TicksPerMs();
 		if (shownOn > shown.refresh && shown.bCounted) {
 			m_late++;
+			if (shown.bReady) {
+				LateReady(shownOn);
+			}
 		}
 		if (shown.bSafe) {
 			m_observed[m_nObserved++ % 3] = (int)(shownOn - shown.firstAfter);
@@ -275,6 +366,7 @@ void CPresentSchedule::Seen(unsigned lastPresent, const DXGI_FRAME_STATISTICS& s
 		break;
 	}
 	(void)lastPresent;
+	return astray;
 }
 
 CPresentSchedule::Plan CPresentSchedule::Choose(long long tickNow, long long tickStamp, double frameMs, double drawMs)
@@ -298,11 +390,26 @@ CPresentSchedule::Plan CPresentSchedule::Choose(long long tickNow, long long tic
 	long long refresh = nearest;
 	bool bDrop = false;
 	long long slotAfter = 0;   // were this one left out: the refresh the next would be given
+	// Cadence slips placed (SetCadenceSlips), once the film has settled. The limit is the
+	// picture shown kSlipLimitMs before its time, or kRelock of a refresh if that is more.
+	const bool bPlace = m_cadenceSlips != CadenceSlipsWhereTheyFall && m_sinceFlush >= kSettling;
+	const double slipLimit = std::max(kRelock, kSlipLimitMs * TicksPerMs() / m_period);
+	const bool bMayMake = m_cadenceSlips == CadenceSlipsOnCutOrMade;
+	bool bSlipIfCut = false, bSlipNextIfCut = false, bDropIfCut = false, bSlipForced = false, bSlipMade = false, bSlipOnCut = false;
+	const bool bSlipNow = m_bSlipNext;   // the picture before opened a shot on a 3
+	m_bSlipNext = false;
+	const bool bNear32 = std::abs(perFrame / 2.5 - (1.0 + kNearCadence)) <= kNearCadenceTol;
+	m_bSlipWaiting = false;
+	// Watched only where slips come often enough to be seen (kSlipsOften): a slip a film at
+	// the screen's own rate owes once an hour goes where it falls.
+	const bool bWholeSlips = bWholeStep && std::abs(perFrame - (double)whole) >= kSlipsOften;
+	m_bSlipCadence = m_cadenceSlips != CadenceSlipsWhereTheyFall && (bWholeSlips || bNear32);
 	if (m_bLast && bWholeStep) {
 		// The step is kept while the picture stays within reach of its own time.
 		refresh = m_lastRefresh + whole;
 		const double off = (double)refresh - x;
 		const double reach = m_sinceFlush < kSettling ? 0.5 : kRelock;
+		const double reachEarly = bPlace ? slipLimit : reach;
 		if (off > reach) {
 			// Shown too long after its time. An earlier refresh if one is free, which
 			// there is only when a frame lasts several; otherwise this picture goes,
@@ -314,8 +421,71 @@ CPresentSchedule::Plan CPresentSchedule::Choose(long long tickNow, long long tic
 				bDrop = true;
 				slotAfter = refresh;
 			}
-		} else if (off < -reach) {
+		} else if (off < -reachEarly) {
 			refresh = nearest; // too soon: the picture before it keeps the screen longer
+			if (bPlace) {
+				bSlipForced = true;
+				bSlipMade = bMayMake && refresh == m_lastRefresh + whole + 1;
+			}
+		} else if (bPlace && off <= -0.5) {
+			// Owed a refresh more: on a cut, or at the limit.
+			bSlipIfCut = true;
+			m_bSlipWaiting = true;
+		} else if (bPlace && whole == 1 && off >= 0.5) {
+			// Owed a picture less, at a film's own rate: on a cut, or at kRelock as ever.
+			// Only where the next one can be drawn in time for this one's refresh, from the
+			// moment the cut is known: this picture's own turn to be presented.
+			const long long tickDecided = std::max(tickNow, RefreshTime(refresh - m_depth - 1) + (long long)callPhase);
+			const long long tickNextReady = tickDecided + (long long)(drawMs * TicksPerMs());
+			bDropIfCut = m_dropRun < kMaxDropRun
+				&& tickNextReady <= RefreshTime(refresh - m_depth) - (long long)guard;
+			m_bSlipWaiting = bDropIfCut;
+		}
+	} else if (m_bLast && bPlace && (m_lastGap == 2 || m_lastGap == 3) && bNear32) {
+		// A 3:2 cadence on a screen a little faster than it: the 3 and 2 kept by turns past
+		// the point where the nearest refresh would give a 3,3, the slip -- always a 2 made a
+		// 3, never a 3 made a 4, but for a made picture that needs a 3 -- taken on a cut from
+		// kSlipEarly of a refresh before that point, or at the limit.
+		const long long gap = m_lastGap == 3 ? 2 : 3;
+		const long long held = m_lastRefresh + gap;
+		const double e = (double)held - x;
+		// From the Present of the picture before the slip to the moment the made picture has
+		// to be ready, after a 2 (one refresh fewer after a 3): the picture after it drawn, and
+		// the made one made, in that time.
+		const double periodMs = m_period / TicksPerMs();
+		const double madeSpanMs = 3.0 * periodMs - (callPhase + guard) / TicksPerMs();
+		const bool bMadeOnThree = bMayMake && m_madeMs > 0.0 && drawMs + m_madeMs > madeSpanMs
+			&& drawMs + m_madeMs <= madeSpanMs + periodMs;
+		if (e < -2.0 || e > 1.5) {
+			// Nowhere near the cadence (a clock that jumped): the nearest refresh again.
+			refresh = std::max(nearest, m_lastRefresh + 1);
+		} else {
+			refresh = held;
+			if (gap == 2) {
+				if (bSlipNow && e < -0.5 + kSlipEarly) {
+					// The picture before opened a shot: this one, its second, is the slip.
+					refresh = held + 1;
+					bSlipOnCut = true;
+				} else if (e < -0.5 - kSlipEarly) {
+					refresh = held + 1;
+					bSlipForced = true;
+					bSlipMade = bMayMake;
+				} else if (e < -0.5 + kSlipEarly) {
+					bSlipIfCut = true;
+					m_bSlipWaiting = true;
+				}
+			} else if (bMadeOnThree && (double)held + 2.0 - (x + perFrame) < -0.5 - kSlipEarly) {
+				// A 3, and the 2 after it would be forced with too little time for its made
+				// picture: the slip here, the 3 made a 4 and the made picture on its fourth
+				// refresh.
+				refresh = held + 1;
+				bSlipForced = true;
+				bSlipMade = true;
+			} else if ((double)held + 2.0 - (x + perFrame) < -0.5 + kSlipEarly) {
+				// A 3, with the 2 after it in the window: a cut here slips that one.
+				bSlipNextIfCut = true;
+				m_bSlipWaiting = true;
+			}
 		}
 	} else if (m_bLast && refresh <= m_lastRefresh) {
 		// Never two pictures for one refresh: the next one, then. But a film with more
@@ -330,6 +500,7 @@ CPresentSchedule::Plan CPresentSchedule::Choose(long long tickNow, long long tic
 		}
 	}
 
+	const long long planned = refresh;
 	plan.tickWanted = RefreshTime(refresh - m_depth - 1) + (long long)callPhase;
 	// The first refresh it can still have, drawn as it is now. A film has to start
 	// with something, however late. After that, a picture more than half a frame
@@ -378,7 +549,129 @@ CPresentSchedule::Plan CPresentSchedule::Choose(long long tickNow, long long tic
 	plan.refresh = refresh;
 	plan.tickRefresh = RefreshTime(refresh);
 	plan.tickCall = std::max(tickNow, RefreshTime(refresh - m_depth - 1) + (long long)callPhase);
+	// A slip planned for a refresh this picture no longer has (it came late) is not one.
+	if (refresh == planned) {
+		plan.bSlipIfCut = bSlipIfCut;
+		plan.bSlipNextIfCut = bSlipNextIfCut;
+		plan.bDropIfCut = bDropIfCut;
+		plan.bSlipForced = bSlipForced;
+		plan.bSlipMade = bSlipMade;
+		plan.bSlipOnCut = bSlipOnCut;
+	}
 	return plan;
+}
+
+void CPresentSchedule::ApplyCut(Plan& plan, const bool bCut)
+{
+	if (!bCut || !plan.bValid || plan.bDrop || plan.bBetween) {
+		return;
+	}
+	if (plan.bSlipIfCut) {
+		const long long period = (long long)m_period;
+		plan.refresh += 1;
+		plan.tickRefresh = RefreshTime(plan.refresh);
+		plan.tickCall += period;
+		plan.tickWanted += period;
+		plan.bSlipIfCut = false;
+		plan.bSlipOnCut = true;
+		m_bSlipWaiting = false;
+	} else if (plan.bSlipNextIfCut) {
+		// The cut opened on a 3: the next picture takes the slip (Choose).
+		plan.bSlipNextIfCut = false;
+		m_bSlipNext = true;
+		m_bSlipWaiting = false;
+	} else if (plan.bDropIfCut) {
+		plan.bDrop = true;
+		plan.bDropIfCut = false;
+		plan.bSlipOnCut = true;
+		m_bSlipWaiting = false;
+		m_dropRun++;
+		if (m_sinceFlush >= kSettling) {
+			m_dropped++;
+			m_slipsOnCut++;
+		}
+	}
+}
+
+CPresentSchedule::Plan CPresentSchedule::MadePlan(const long long tickNow, const Plan& next, double& t) const
+{
+	Plan made;
+	t = 0.5;
+	if (!next.bValid || next.bDrop || !next.bSlipForced || !next.bSlipMade || !m_bLast) {
+		return made;
+	}
+	// The refresh the slip adds is the one before the drawn picture's own.
+	const long long refresh = next.refresh - 1;
+	if (refresh <= m_lastRefresh) {
+		return made;
+	}
+	const double callPhase = std::min(kCallPhase * m_period, kCallPhaseMaxMs * TicksPerMs());
+	const double guard = std::min(kGuardPhase * m_period, kGuardMaxMs * TicksPerMs());
+	if (tickNow > RefreshTime(refresh - m_depth) - (long long)guard) {
+		return made; // too late for it: the slip stays a plain one
+	}
+	// Each picture goes on the refresh nearest its own time, so a refresh shows the film as
+	// it is at that refresh's moment: the made picture is the film at the moment of the
+	// refresh it is for, between the two pictures' own times.
+	const double span = (double)(next.tickDue - m_lastDue);
+	if (span <= 0) {
+		return made;
+	}
+	t = std::clamp((double)(RefreshTime(refresh) - m_lastDue) / span, 0.05, 0.95);
+	made.bValid = true;
+	made.bBetween = true;
+	made.refresh = refresh;
+	made.tickRefresh = RefreshTime(refresh);
+	made.tickWanted = RefreshTime(refresh - m_depth - 1) + (long long)callPhase;
+	made.tickCall = std::max(tickNow, made.tickWanted);
+	made.tickDue = m_lastDue + (long long)(t * span);
+	made.tickStamp = made.tickDue;
+	return made;
+}
+
+long long CPresentSchedule::ReadyBy(const Plan& plan) const
+{
+	const double guard = std::min(kGuardPhase * m_period, kGuardMaxMs * TicksPerMs());
+	return RefreshTime(plan.refresh - m_depth) - (long long)guard;
+}
+
+double CPresentSchedule::StuckSpacing() const
+{
+	if (m_nominalMs <= 0) {
+		return 0.0;
+	}
+	// The display mode's own rate, as Windows' display configuration gives it (23.976 Hz)
+	// and not what the refreshes measure, so that a mode of 24 Hz measured a little under it
+	// is still a whole number.
+	const double hz = 1000.0 / m_nominalMs;
+	const double above = hz - std::floor(hz);
+	return above < 0.02 ? 0.0 : hz / above;
+}
+
+void CPresentSchedule::LateReady(const long long refresh)
+{
+	if (m_bLateGroup && refresh - m_lateLast <= kStuckGroup) {
+		m_lateLast = refresh;
+		return;
+	}
+	const double spacing = StuckSpacing();
+	const double since = (double)(refresh - m_lateStart);
+	if (m_bLateGroup && spacing > 0 && std::abs(since - spacing) <= kStuckTolerance * spacing) {
+		m_stuckRun++;
+	} else {
+		m_stuckRun = 1;
+	}
+	m_bLateGroup = true;
+	m_lateStart = m_lateLast = refresh;
+}
+
+bool CPresentSchedule::FlipsStuck()
+{
+	if (m_stuckRun < kStuckRun) {
+		return false;
+	}
+	m_stuckRun = 0;
+	return true;
 }
 
 void CPresentSchedule::LeftOut()
@@ -388,17 +681,34 @@ void CPresentSchedule::LeftOut()
 	}
 }
 
-void CPresentSchedule::Presented(unsigned presentId, const Plan& plan, long long tickCalled, double msInside)
+void CPresentSchedule::Presented(unsigned presentId, const Plan& plan, long long tickCalled, double msInside, bool bReady)
 {
 	const bool bSettled = m_sinceFlush >= kSettling;
-	if (plan.bRepeat && bSettled) {
-		m_repeated++;
-	}
-	m_bLast = true;
-	m_lastRefresh = plan.refresh;
-	m_dropRun = 0;
-	if (m_sinceFlush < kSettling) {
-		m_sinceFlush++;
+	if (plan.bBetween) {
+		// A made picture between two drawn ones: on the screen like any, but the step, the
+		// cadence and the counts go by the drawn pictures alone.
+		if (bSettled) {
+			m_madeShown++;
+		}
+	} else {
+		if (plan.bRepeat && bSettled && !plan.bSlipOnCut && !plan.bSlipForced) {
+			m_repeated++;
+		}
+		if (bSettled) {
+			m_slipsOnCut += plan.bSlipOnCut ? 1 : 0;
+			m_slipsForced += plan.bSlipForced ? 1 : 0;
+		}
+		m_lastGap = m_bLast ? plan.refresh - m_lastRefresh : 0;
+		if (m_lastGap == 4 && plan.bSlipForced) {
+			m_lastGap = 3;   // a 3 made a 4 for a made picture: the picture after it is a 2
+		}
+		m_lastDue = plan.tickDue;
+		m_bLast = true;
+		m_lastRefresh = plan.refresh;
+		m_dropRun = 0;
+		if (m_sinceFlush < kSettling) {
+			m_sinceFlush++;
+		}
 	}
 	// Present returns in a fraction of a millisecond when nothing is in its way. One
 	// that was waiting for the picture before it to be taken returns when that
@@ -422,9 +732,12 @@ void CPresentSchedule::Presented(unsigned presentId, const Plan& plan, long long
 		// they were. Which of the two is the ordinary choice in Choose.
 		shownOn = std::max(plan.refresh + 1,
 			(long long)std::ceil(RefreshIndex(tickReturned + (long long)lateGuard)) + m_depth);
-		m_lastRefresh = shownOn;
-		if (bSettled) {
-			m_late++;
+		if (!plan.bBetween) {
+			m_lastRefresh = shownOn;
+			m_lastGap = 0; // the cadence is found again from the nearest refresh
+			if (bSettled) {
+				m_late++;
+			}
 		}
 	}
 
@@ -445,7 +758,8 @@ void CPresentSchedule::Presented(unsigned presentId, const Plan& plan, long long
 	const double guard = std::min(kGuardPhase * m_period, kGuardMaxMs * TicksPerMs());
 	pending.bSafe = !bWaited && sinceRefresh > 0.02 * m_period && m_period - sinceRefresh > guard;
 	pending.refresh = shownOn; // where it will really be: not late a second time when DXGI says so
-	pending.bCounted = bSettled;
+	pending.bCounted = bSettled && !plan.bBetween;
+	pending.bReady = bReady;
 }
 
 // CPacingTrace
@@ -457,7 +771,7 @@ CPacingTrace::CPacingTrace()
 	if (length > 0 && length < MAX_PATH) {
 		m_path = path;
 		m_bEnabled = true;
-		m_pictures.reserve(16384); // eleven minutes of film before the list has to grow
+		m_pictures.reserve(1024 + 64); // written out every 1024 (Add)
 	}
 }
 
@@ -474,6 +788,12 @@ void CPacingTrace::Add(const Picture& picture)
 {
 	if (m_bEnabled) {
 		m_pictures.push_back(picture);
+		// Out to the file every forty seconds or so at 24 fps, so that a trace can be read
+		// while the film plays: what goes wrong after half an hour is watched for, not waited
+		// for until the player closes.
+		if (m_pictures.size() >= 1024 + 32) {
+			Write(32);
+		}
 	}
 }
 
@@ -484,16 +804,21 @@ void CPacingTrace::SetCut(long long rtStart, const float* state)
 	for (size_t i = 0; i < n && i < 32; i++) {
 		Picture& p = m_pictures[n - 1 - i];
 		if (p.rtStart == rtStart && p.cutHist < 0) {
-			p.cutHist  = (int)std::lround(std::clamp(state[1], 0.0f, 2.0f) * 1000.0f);
-			p.cutResid = (int)std::lround(std::clamp(state[2], 0.0f, 1.0f) * 1e6f);
-			p.cutRatio = (int)std::lround(std::clamp(state[3], 0.0f, 1e7f) * 10.0f);
-			p.cutCorr  = (int)std::lround(std::clamp(state[14], -1.0f, 1.0f) * 1000.0f);
+			TakeCut(p, state);
 			if (state[0] > 0.5f) {
 				p.flags |= SceneCut;
 			}
 			return;
 		}
 	}
+}
+
+void CPacingTrace::TakeCut(Picture& p, const float* state)
+{
+	p.cutHist  = (int)std::lround(std::clamp(state[1], 0.0f, 2.0f) * 1000.0f);
+	p.cutResid = (int)std::lround(std::clamp(state[2], 0.0f, 1.0f) * 1e6f);
+	p.cutRatio = (int)std::lround(std::clamp(state[3], 0.0f, 1e7f) * 10.0f);
+	p.cutCorr  = (int)std::lround(std::clamp(state[14], -1.0f, 1.0f) * 1000.0f);
 }
 
 void CPacingTrace::SetGpu(long long rtStart, float vpMs, float allMs)
@@ -509,11 +834,28 @@ void CPacingTrace::SetGpu(long long rtStart, float vpMs, float allMs)
 	}
 }
 
-void CPacingTrace::Write()
+void CPacingTrace::SetHdr(long long rtStart, const float* state)
+{
+	// The layout of cs_hdr_resolve.hlsl: state[1] = { raw peak, raw average, peak used
+	// (floored), smoothed average }, nits; state[4] = { window position, frames in it, ... }.
+	const size_t n = m_pictures.size();
+	for (size_t i = 0; i < n && i < 32; i++) {
+		Picture& p = m_pictures[n - 1 - i];
+		if (p.rtStart == rtStart && p.hdrPeak < 0) {
+			p.hdrPeak = (int)std::lround(std::clamp(state[4], 0.0f, 10000.0f));
+			p.hdrUsed = (int)std::lround(std::clamp(state[6], 0.0f, 10000.0f));
+			p.hdrFrames = (int)std::lround(std::clamp(state[17], 0.0f, 100000.0f));
+			return;
+		}
+	}
+}
+
+void CPacingTrace::Write(const size_t keep)
 {
 	if (!m_bEnabled || (m_pictures.empty() && m_notes.empty())) {
 		return;
 	}
+	const size_t count = m_pictures.size() > keep ? m_pictures.size() - keep : 0;
 	FILE* file = nullptr;
 	if (_wfopen_s(&file, m_path.c_str(), L"a") != 0 || !file) {
 		m_pictures.clear();
@@ -529,22 +871,24 @@ void CPacingTrace::Write()
 			"tickPresentReturn,tickTarget,renderAhead,flags,"
 			"lastPresent0,presentCount0,presentRefresh0,syncRefresh0,syncQpc0,"
 			"lastPresent1,presentCount1,presentRefresh1,syncRefresh1,syncQpc1,"
-			"nrWaitUs,nrRecordUs,nrGpuUs,cutHist,cutRatio,cutResid,cutCorr,tickGpuDone,tickStamp,tickDue,gpuVpUs,gpuAllUs\n");
+			"nrWaitUs,nrRecordUs,nrGpuUs,cutHist,cutRatio,cutResid,cutCorr,tickGpuDone,tickStamp,tickDue,gpuVpUs,gpuAllUs,"
+			"hdrPeak,hdrUsed,hdrFrames\n");
 	}
 	for (const std::wstring& note : m_notes) {
 		fprintf(file, "# %ls\n", note.c_str());
 	}
-	for (const Picture& p : m_pictures) {
-		fprintf(file, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%d,%u,%u,%u,%u,%u,%lld,%u,%u,%u,%u,%lld,%d,%d,%d,%d,%d,%d,%d,%lld,%lld,%lld,%d,%d\n",
+	for (size_t i = 0; i < count; i++) {
+		const Picture& p = m_pictures[i];
+		fprintf(file, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%d,%u,%u,%u,%u,%u,%lld,%u,%u,%u,%u,%lld,%d,%d,%d,%d,%d,%d,%d,%lld,%lld,%lld,%d,%d,%d,%d,%d\n",
 			m_written++, p.rtStart, p.rtClockAtCall, p.rtClockAtReturn, p.tickSample, p.tickDrawn, p.tickAfterVBlank,
 			p.tickPresentCall, p.tickPresentReturn, p.tickTarget, p.renderAhead, p.flags,
 			p.before.lastPresent, p.before.presentCount, p.before.presentRefresh, p.before.syncRefresh, p.before.syncQpc,
 			p.after.lastPresent, p.after.presentCount, p.after.presentRefresh, p.after.syncRefresh, p.after.syncQpc,
 			p.nrWaitUs, p.nrRecordUs, p.nrGpuUs, p.cutHist, p.cutRatio, p.cutResid, p.cutCorr,
-			p.tickGpuDone, p.tickStamp, p.tickDue, p.gpuVpUs, p.gpuAllUs);
+			p.tickGpuDone, p.tickStamp, p.tickDue, p.gpuVpUs, p.gpuAllUs, p.hdrPeak, p.hdrUsed, p.hdrFrames);
 	}
 	fclose(file);
-	m_pictures.clear();
+	m_pictures.erase(m_pictures.begin(), m_pictures.begin() + count);
 	m_notes.clear();
 }
 
@@ -557,7 +901,8 @@ void CCutReadback::Release()
 	}
 }
 
-void CCutReadback::Copy(ID3D11Device* pDevice, ID3D11DeviceContext* pContext, ID3D11Buffer* pState, long long rtStart)
+void CCutReadback::Copy(ID3D11Device* pDevice, ID3D11DeviceContext* pContext, ID3D11Buffer* pState, long long rtStart,
+	const UINT bytes)
 {
 	if (!pDevice || !pContext || !pState) {
 		return;
@@ -569,6 +914,11 @@ void CCutReadback::Copy(ID3D11Device* pDevice, ID3D11DeviceContext* pContext, ID
 		if (!slot.pStaging) {
 			D3D11_BUFFER_DESC desc = {};
 			pState->GetDesc(&desc);
+			if (bytes) {
+				// The head alone, into a plain buffer, as the statistics read the HDR state.
+				desc.ByteWidth = std::min(bytes, desc.ByteWidth);
+				desc.StructureByteStride = 0;
+			}
 			desc.Usage          = D3D11_USAGE_STAGING;
 			desc.BindFlags      = 0;
 			desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -576,8 +926,14 @@ void CCutReadback::Copy(ID3D11Device* pDevice, ID3D11DeviceContext* pContext, ID
 			if (FAILED(pDevice->CreateBuffer(&desc, nullptr, &slot.pStaging))) {
 				return;
 			}
+			slot.bytes = desc.ByteWidth;
 		}
-		pContext->CopyResource(slot.pStaging, pState);
+		if (bytes) {
+			const D3D11_BOX box = { 0, 0, 0, slot.bytes, 1, 1 };
+			pContext->CopySubresourceRegion(slot.pStaging, 0, 0, 0, 0, pState, 0, &box);
+		} else {
+			pContext->CopyResource(slot.pStaging, pState);
+		}
 		slot.rtStart = rtStart;
 		slot.order = m_copies++;
 		slot.bPending = true;

@@ -51,6 +51,8 @@ CALL :Run "the pipeline"                       "dlssnr_harness.exe --tpipeline -
 CALL :Run "upscalers on film"                  "dlssnr_harness.exe --tupscale --nonr --nomodels"
 CALL :Run "chroma upsamplers on film"          "dlssnr_harness.exe --tchroma --nonr"
 CALL :Run "sharpeners on film"                 "dlssnr_harness.exe --tsharpen --nonr --nomodels"
+CALL :Run "the dither before output"           "dlssnr_harness.exe --tdither --nonr"
+CALL :Run "the peak HDR tone mapping follows"  "dlssnr_harness.exe --ttonemap --nonr"
 REM Deblocking and debanding on the decoded planes, at their five levels, and their
 REM shaders against the reference in double precision.
 CALL :Run "artifact removal on film"           "dlssnr_harness.exe --tclean --nonr --srrefs 4"
@@ -58,6 +60,10 @@ REM The channel's logo: six logos laid over the film, one across a black bar's e
 REM fitted and taken out, three of them through x264; the shaders against the reference,
 REM and what they cost.
 CALL :Run "a channel's logo hidden on film"     "dlssnr_harness.exe --tlogo --nonr"
+REM The cadence slips: the schedule against a simulated screen, and the picture made for
+REM a slip no cut came in time for, against EchoStorm's own where its code is at hand.
+CALL :Run "the cadence slips' schedule"        "dlssnr_harness.exe --tcadence --nonr"
+CALL :Run "the picture made for a cadence slip" "dlssnr_harness.exe --tcadencemade --nonr --timage" "%REF%"
 CALL :Run "video processor rebuild"            "vp_rebuild_test.exe"
 CALL :Run "the generated 4:4:4 chroma pass"    "shader444_test.exe"
 CALL :Run "playback, 10 s"                     "playback_test.exe --seconds 10"
@@ -76,6 +82,7 @@ CALL :Run "pictures from a decoder's device"   "playback_test.exe --gpu --toggle
 CALL :Run "the Settings page and its lists"    "playback_test.exe --mainpage 2"
 CALL :Run "the Settings page, DLSS 5 NR"       "playback_test.exe --mainpage 2 --section 4"
 CALL :Run "the Settings page, Detail"          "playback_test.exe --mainpage 2 --section 3"
+CALL :Run "the Settings page, Presentation"    "playback_test.exe --mainpage 2 --section 6"
 REM Five graphs made and unmade in one process, DLSS off and on: what a player does
 REM from one film to the next. It was called "the DLSS page" and ran a switch that no
 REM longer existed, so it played these without saying so -- and it is where the fault of
@@ -92,6 +99,7 @@ REM one. Nothing above reaches it -- the bench's own film is RGB, which never br
 REM hardware processor in. It needs the film, and the LAV Filters of an installed player.
 CALL :Run "the processor enlarging after DLSS 5 NR" "playback_test.exe --afternr --seek 1740 --seconds 4 --window 2880x1200 --file" "%FILM%"
 CALL :Run "the processor after DLSS 5 NR, PQ picture" "playback_test.exe --afternr --seek 1740 --seconds 4 --window 2880x1200 --hdrout 1 --rtxhdr 1 --file" "%FILM%"
+CALL :Run "a snapshot leaves RTX Video HDR's picture as it was" "playback_test.exe --aftergrab --seek 1740 --seconds 4 --rtxhdr 1 --hdrtm 1 --measurepeak 1 --stats 1 --only 0 --file" "%FILM%"
 
 REM Every step named above has to be in the report: one left out prints no verdict, so
 REM nothing below would say it. Counted, and given a verdict of its own. Counted here

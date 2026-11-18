@@ -92,10 +92,11 @@ protected:
 	int  m_iVPDeinterlacing                = DEINT_Enable;
 	bool m_bDeintDouble                    = true;
 	bool m_bVPScaling                      = true;
-	int  m_iChromaScaling                  = CHROMA_CatmullRom;
+	int  m_iChromaScaling                  = CHROMA_EwaLanczosSharp;
 	int  m_iUpscaling                      = UPSCALE_Jinc2;      // interpolation
 	int  m_iDownscaling                    = DOWNSCALE_Hamming;  // convolution
 	bool m_bUseDither                      = true;
+	bool m_bDitherMoving                   = false;
 	bool m_bDeintBlend                     = false;
 	int  m_iSwapEffect                     = SWAPEFFECT_Flip;
 	bool m_bVBlankBeforePresent            = false;

@@ -28,6 +28,13 @@
 //   playback_test.exe --mainpage N    shows the filter's settings page for N seconds
 //                                     --section K picks which of its sections to show
 //   playback_test.exe --chroma10 <png>  --chroma in ten bits: P010 against a Y410 reference
+//   playback_test.exe --chroma <png> --ewa   libplacebo's polar kernels on the chroma instead of the
+//                                     list's methods, each through the Jinc (EWA) entry
+//                                     (the filter's test hook MPCVR_CHROMA_EWA), with RAVU-zoom
+//                                     and FSRCNNX 8 AR beside them
+//   playback_test.exe --chroma <png> --upscale   the picture shown at twice its size, enlarged by
+//                                     Catmull-Rom, sharpening off; also scored against the file's
+//                                     own picture before it was reduced (a 4K frame for a 1080p one)
 //   playback_test.exe --chroma <png> --interlaced   the media type says interlaced, to see
 //   playback_test.exe --toggle          settings changed in full playback, as the player does
 //   playback_test.exe --delay N [--delayto M]   the Video delay setting, and moved while it plays;
@@ -42,6 +49,15 @@
 //                                     blocks, fed in NV12, cleaned by each path that converts it;
 //                                     --clean10 the same in P010. --file <film> --deblock N --deband N
 //                                     plays a film with the artifact removal at those levels (0 off)
+//   playback_test.exe --file <film> --aftergrab   the screen on the same paused picture, statistics
+//                                     off, before the first snapshot and after the last: a snapshot
+//                                     must leave the renderer as it found it
+//   playback_test.exe --file <film> --cadence N   the cadence slips: 0 where they fall, 1 on a scene
+//                                     cut, 2 on a cut or else a made picture (with MPCVR_PACING_TRACE,
+//                                     pacing_report.py counts them)
+//   playback_test.exe --file <film> --peakcuts 0|1   the measured peak's window starts over at a
+//                                     scene cut (SdrPeakSceneCuts); with MPCVR_PACING_TRACE,
+//                                     pacing_report.py --peak says how the peak followed each cut
 
 #include <windows.h>
 #include <VersionHelpers.h>
@@ -92,6 +108,7 @@ static bool g_bHardwareVP = false; // --vp: leave the video processor the format
 // --chroma: one still picture fed as 4:2:0 and as 4:4:4, at 1:1, to see what each
 // chroma upsampler rebuilds -- the hardware video processor included.
 static bool g_bChroma = false;
+static bool g_bEwa = false;       // --ewa: with --chroma, libplacebo's polar kernels
 static bool g_bChroma444 = false;      // this run feeds AYUV, the reference
 // --clean: the same machinery, the 4:2:0 picture's planes coded as MPEG-2 intra blocks at
 // this quantiser_scale_code first, and each run asking for its own artifact removal.
@@ -130,6 +147,8 @@ static int g_filmDoviTm = -1;     // --dovitm 0|6
 static int g_filmSdrTm = -1;      // --sdrtm 0 Fixed, 1 Metadata, 2 Measured
 static int g_filmToSdr = -1;      // --tosdr 0|1
 static int g_filmPreferDovi = -1; // --prefdovi 0|1
+static int g_filmCadence = -1;    // --cadence 0..2: where the cadence slips go (CADENCE_SLIPS_*)
+static int g_filmPeakCuts = -1;   // --peakcuts 0|1: the measured peak starts over at a cut
 // --asis: leave the settings exactly as the registry has them. The only way to drive a
 // renderer this bench did not build: Settings_t has grown fields since, so SetSettings
 // on the stock filter writes a layout it does not know and it ignores the lot. Each
@@ -145,6 +164,7 @@ static bool g_bThemedHost = false;     // --themed: and a player that paints it
 static bool g_bDlaa = false;           // --dlaa: let DLSS SR run without enlarging
 static bool g_bAfterNR = false;        // --afternr: who enlarges what DLSS 5 NR leaves, on a real film (--file)
 static bool g_bVPTurns = false;        // --vpturns: who enlarges, without DLSS, the desktop read unclipped (--file)
+static bool g_bAfterGrab = false;      // --aftergrab: the screen on the same paused picture before and after a snapshot (--file)
 static bool g_bLogo = false;           // --logo: the channel's logo found and hidden on a real film (--file)
 static int g_smallUpscaling = -1;      // --small N: another method under 5 %
 static int g_videoDelay = 0;           // --delay N: every picture N ms after its time (the Video delay setting)
@@ -202,6 +222,11 @@ static bool NV12Source() { return g_bScalers || g_bToggle; }
 static bool g_bChroma10 = false;       // --chroma10: 10 bits, P010 against Y410
 static bool g_bInterlaced = false;     // --interlaced: the media type says so, to see who converts
 static std::vector<BYTE> g_refPicture; // BGRA, top-down, the picture --chroma plays
+// --upscale: the picture shown at this many times its size; and the file's picture before
+// it was reduced by two, when it was, at the size it is shown then.
+static int g_chromaScale = 1;
+static std::vector<BYTE> g_refFull;
+static int g_refFullW = 0, g_refFullH = 0;
 static bool g_bChromaVerbose = false;  // --verbose: the whole overlay of each run
 
 // The film: soft gradients, a textured band and discs moving at different speeds,
@@ -935,6 +960,7 @@ struct Config {
 	int iSharpen = -1;              // --sharpencal: SHARPEN_*, -1 the saved setting
 	float fSharpenStrength = 0;     // and the strength it is given instead of its level's, 0: none
 	int iSharpenLevel = SHARPEN_LEVEL_DEF;  // the level, when no strength replaces it
+	const wchar_t* ewa = nullptr;   // --ewa: the polar kernel the Jinc entry takes (MPCVR_CHROMA_EWA)
 };
 
 struct Result {
@@ -974,6 +1000,7 @@ struct Result {
 	double stillMean = 0, stillP99 = 0, stillPeak = 0, stillColour = 0, stillAbove = 0, stillDetail = 0;
 	DXGI_FORMAT stillFormat = DXGI_FORMAT_UNKNOWN;  // what the desktop frame came in
 	double stopSeconds[3] = {};
+	bool bSnapshotChanged = false;  // --aftergrab: the screen was not the same after a snapshot
 	std::string error;
 };
 
@@ -1055,6 +1082,11 @@ static bool LoadPicture(const wchar_t* path, int w, int h, std::string& error)
 				g_refPicture[4 * ((size_t)y * w + x) + k] = (BYTE)((acc + factor * factor / 2) / (factor * factor));
 			}
 		}
+	}
+	if (factor == 2) {
+		g_refFull = std::move(taken);
+		g_refFullW = 2 * w;
+		g_refFullH = 2 * h;
 	}
 	printf("picture: %dx%d, reduced by %d from the file\n", w, h, factor);
 	return true;
@@ -1389,6 +1421,8 @@ static StillDifference CompareStills(const std::vector<BYTE>& picture, const std
 
 static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE source, SIZE window, int seconds)
 {
+	// Read by the filter as it writes its conversion shader, so before there is a renderer.
+	SetEnvironmentVariableW(L"MPCVR_CHROMA_EWA", config.ewa);
 	Result result;
 	HRESULT hr = S_OK;
 
@@ -1495,6 +1529,13 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 			sets.bVPScaling = true;
 			sets.iVPSuperRes = config.iSuperRes;
 		}
+		// --upscale: the enlargement every run shares. The networks take their colour from
+		// Catmull-Rom too, so what this says of the chroma holds under them.
+		if (g_chromaScale > 1) {
+			sets.iUpscaling = UPSCALE_CatmullRom;
+			sets.bUpscalingSmall = false;
+			sets.iSharpen = SHARPEN_Disabled;
+		}
 	}
 	if (g_filmFile) {
 		// The film runs with the hardware processor taking every format, since that is
@@ -1534,6 +1575,12 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		}
 		if (g_filmSdrTm >= 0) {
 			sets.iSdrToneMappingType = g_filmSdrTm;
+		}
+		if (g_filmCadence >= 0) {
+			sets.iCadenceSlips = g_filmCadence;
+		}
+		if (g_filmPeakCuts >= 0) {
+			sets.bSdrPeakSceneCuts = g_filmPeakCuts != 0;
 		}
 		if (g_filmToSdr >= 0) {
 			sets.bConvertToSdr = g_filmToSdr != 0;
@@ -1596,6 +1643,15 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		if (g_filmDeblock >= 0 || g_filmDeband >= 0) {
 			printf("   clean kept   : deblock %d level %d, deband %d level %d\n",
 				back.iDeblock, back.iDeblockLevel, (int)back.bDeband, back.iDebandLevel);
+		}
+		// The cadence slips, and the last field of Settings_t now, the dither's.
+		if (g_filmCadence >= 0) {
+			printf("   cadence kept : slips %d, swap chain renewal %d, logo margin %d\n", back.iCadenceSlips,
+				(int)back.bSwapChainRenew, back.iLogoMargin);
+		}
+		if (g_filmPeakCuts >= 0) {
+			printf("   peak kept    : start over at a cut %d, dither moving %d\n", (int)back.bSdrPeakSceneCuts,
+				(int)back.bDitherMoving);
 		}
 	}
 	}
@@ -1905,6 +1961,28 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		SeekTo(pGraph, g_filmSeek);
 		Pump(2500);
 	}
+	// A snapshot (GetCurrentImage, the player's "save image") renders the picture again
+	// into a target of its own, and puts the renderer back as it found it. Whether it
+	// does is read on the screen: the same paused picture, statistics off, before the
+	// first snapshot and after the last one.
+	std::wstring screenBeforeGrab;
+	const auto ReadPausedScreen = [&]() {
+		SeekTo(pGraph, g_filmSeek);
+		Pump(2500);
+		SetForegroundWindow(hwnd);
+		BringWindowToTop(hwnd);
+		Pump(600);
+		const CScreenWatch::Reading s = watch.Measure(hwnd);
+		return s.ok
+			? std::format(L"mean {:.4f}, p99 {:.4f}, peak {:.3f}, colour {:.4f}, past SDR white {:.2f}%",
+				s.mean, s.p99, s.peak, s.colour, s.aboveWhite)
+			: std::wstring(L"could not be read");
+	};
+	if (g_bAfterGrab && g_filmFile && watch.Ready()) {
+		sets.bShowStats = false;
+		pVR->SetSettings(sets);
+		screenBeforeGrab = ReadPausedScreen();
+	}
 	if (g_bScalers || g_bChroma || g_filmFile) {
 		// One picture with the statistics over it, for the look of the box.
 		GrabDisplayed(pRenderer, result.statsPicture, result.pictureW, result.pictureH);
@@ -1945,6 +2023,24 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 				Pump(250);
 			}
 		}
+	}
+	if (!screenBeforeGrab.empty()) {
+		// The pictures above are the back buffer as it is ("displayedImage"); a player's
+		// "save image" asks IBasicVideo::GetCurrentImage instead, which renders the
+		// picture again (GetCurentImage) and is the path that rebuilds the renderer's
+		// HDR shaders around it.
+		CComQIPtr<IBasicVideo> pBasicVideo(pRenderer.p);
+		long imageSize = 0;
+		HRESULT hrImage = pBasicVideo ? pBasicVideo->GetCurrentImage(&imageSize, nullptr) : E_NOINTERFACE;
+		if (SUCCEEDED(hrImage) && imageSize > 0) {
+			std::vector<BYTE> image(imageSize);
+			hrImage = pBasicVideo->GetCurrentImage(&imageSize, reinterpret_cast<long*>(image.data()));
+		}
+		printf("   GetCurrentImage  : 0x%08lX, %ld bytes\n", hrImage, imageSize);
+		const std::wstring after = ReadPausedScreen();
+		wprintf(L"   before a snapshot: %s\n   after a snapshot : %s\n   %s\n", screenBeforeGrab.c_str(), after.c_str(),
+			after == screenBeforeGrab ? L"the snapshot left the picture as it was" : L"FAIL: the picture changed after a snapshot");
+		result.bSnapshotChanged = after != screenBeforeGrab;
 	}
 	if ((g_bAfterNR || g_bVPTurns) && watch.Ready()) {
 		// The same still under every run, as the desktop shows it. The filter's own
@@ -2781,6 +2877,10 @@ int wmain(int argc, wchar_t* argv[])
 			g_filmDoviTm = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--sdrtm")) {
 			g_filmSdrTm = _wtoi(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--peakcuts")) {
+			g_filmPeakCuts = _wtoi(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--cadence")) {
+			g_filmCadence = std::clamp(_wtoi(argv[i + 1]), 0, CADENCE_SLIPS_COUNT - 1);
 		} else if (!wcscmp(argv[i], L"--tosdr")) {
 			g_filmToSdr = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--prefdovi")) {
@@ -2808,6 +2908,12 @@ int wmain(int argc, wchar_t* argv[])
 		}
 	}
 	for (int i = 1; i < argc; i++) {
+		if (!wcscmp(argv[i], L"--ewa")) {
+			g_bEwa = true;
+		}
+		if (!wcscmp(argv[i], L"--upscale")) {
+			g_chromaScale = 2;
+		}
 		if (!wcscmp(argv[i], L"--scalers")) {
 			g_bScalers = true;
 			source.cx &= ~1; // NV12
@@ -2824,6 +2930,8 @@ int wmain(int argc, wchar_t* argv[])
 			g_bGreying = true;
 		} else if (!wcscmp(argv[i], L"--afternr")) {
 			g_bAfterNR = true;
+		} else if (!wcscmp(argv[i], L"--aftergrab")) {
+			g_bAfterGrab = true;
 		} else if (!wcscmp(argv[i], L"--vpturns")) {
 			g_bVPTurns = true;
 		} else if (!wcscmp(argv[i], L"--dlaa")) {
@@ -2878,7 +2986,11 @@ int wmain(int argc, wchar_t* argv[])
 			printf("--chroma: %s\n", error.c_str());
 			return 1;
 		}
-		window = source;
+		window = { source.cx * g_chromaScale, source.cy * g_chromaScale };
+		if (g_chromaScale > 1) {
+			printf("shown at %dx%d, enlarged by Catmull-Rom%s\n", window.cx, window.cy,
+				g_refFullW == window.cx && g_refFullH == window.cy ? "; scored against the file's own picture as well" : "");
+		}
 	}
 
 	wchar_t exe[MAX_PATH] = {};
@@ -2959,6 +3071,7 @@ int wmain(int argc, wchar_t* argv[])
 		{ "FSRCNNX 8 AR, chroma Catmull-Rom", false, false, true, UPSCALE_FSRCNNX8AR, CHROMA_CatmullRom },
 		{ "FSRCNNX 16 AR, chroma Catmull-Rom", false, false, true, UPSCALE_FSRCNNX16AR, CHROMA_CatmullRom },
 		{ "ArtCNN C4F16 DS, chroma Catmull-Rom", false, false, true, UPSCALE_ArtCNN, CHROMA_CatmullRom },
+		{ "Anime4K CNN x2 M AR, chroma Catmull-Rom", false, false, true, UPSCALE_Anime4KAR, CHROMA_CatmullRom },
 		{ "Catmull-Rom, chroma RAVU-zoom",   false, false, true, UPSCALE_CatmullRom, CHROMA_RAVU       },
 		{ "RAVU-zoom, chroma RAVU-zoom",     false, false, true, UPSCALE_RAVUZoom,   CHROMA_RAVU       },
 		{ "ArtCNN C4F16 DS, chroma Jinc",    false, false, true, UPSCALE_ArtCNN,     CHROMA_Jinc       },
@@ -2975,6 +3088,9 @@ int wmain(int argc, wchar_t* argv[])
 		{ "4:2:0, shaders, Catmull-Rom",       false, false, true, -1, CHROMA_CatmullRom               },
 		{ "4:2:0, shaders, RAVU-zoom",         false, false, true, -1, CHROMA_RAVU                     },
 		{ "4:2:0, shaders, Jinc (EWA)",        false, false, true, -1, CHROMA_Jinc                     },
+		{ "4:2:0, shaders, EWA Lanczos Sharp", false, false, true, -1, CHROMA_EwaLanczosSharp          },
+		{ "4:2:0, shaders, EWA Lanczos4 Sharpest", false, false, true, -1, CHROMA_EwaLanczos4Sharpest  },
+		{ "4:2:0, shaders, EWA Ginseng",       false, false, true, -1, CHROMA_EwaGinseng               },
 		{ "4:2:0, shaders, FSRCNNX 8 AR",      false, false, true, -1, CHROMA_FSRCNNX8AR               },
 		{ "4:2:0, hardware VP, chroma replaced, Jinc", false, false, true, -1, CHROMA_Jinc, true, false, true },
 		{ "4:2:0, hardware VP, chroma replaced, FSRCNNX 8 AR", false, false, true, -1, CHROMA_FSRCNNX8AR, true, false, true },
@@ -2983,6 +3099,24 @@ int wmain(int argc, wchar_t* argv[])
 		{ "4:2:0, hardware VP, HDR out, RTX Video HDR OFF", false, false, true, -1, -1, true, false, false, true, 0 },
 		{ "4:2:0, hardware VP, HDR out, RTX Video HDR ON",  false, false, true, -1, -1, true, false, false, true, 1 },
 		{ "4:2:0, VP + 4:4:4 pre-pass, HDR out, RTX Video HDR ON", false, false, true, -1, CHROMA_CatmullRom, true, false, true, true, 1 },
+	};
+	// --ewa: the Jinc (EWA) entry with each of libplacebo's polar kernels (filters.c at
+	// 29a56f92), against the 4:4:4 picture as --chroma has it. The first two are the list's,
+	// for scale; "ewa_lanczos" is the shipped Jinc with libplacebo's exact constants.
+	static const Config ewaConfigs[] = {
+		{ "4:4:4 (AYUV), nothing to upsample", false, false, true, -1, -1,          false, true },
+		{ "Catmull-Rom",                       false, false, true, -1, CHROMA_CatmullRom        },
+		{ "Jinc (EWA), as shipped",            false, false, true, -1, CHROMA_Jinc              },
+		{ .name = "ewa_lanczos",          .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_lanczos"          },
+		{ .name = "ewa_lanczossharp",     .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_lanczossharp"     },
+		{ .name = "ewa_lanczos4sharpest", .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_lanczos4sharpest" },
+		{ .name = "ewa_jinc",             .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_jinc"             },
+		{ .name = "ewa_ginseng",          .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_ginseng"          },
+		{ .name = "ewa_hann",             .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_hann"             },
+		{ .name = "ewa_robidoux",         .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_robidoux"         },
+		{ .name = "ewa_robidouxsharp",    .bAhead = true, .iChromaScaling = CHROMA_Jinc, .ewa = L"ewa_robidouxsharp"    },
+		{ "RAVU-zoom",                         false, false, true, -1, CHROMA_RAVU              },
+		{ "FSRCNNX 8 AR",                      false, false, true, -1, CHROMA_FSRCNNX8AR        },
 	};
 	// --clean: the same reference, and the picture coded as MPEG-2 intra blocks through
 	// each path that converts it, without the artifact removal and with it. The cleaning
@@ -3067,9 +3201,9 @@ int wmain(int argc, wchar_t* argv[])
 		}
 	}
 	const Config* configs = g_bSharpenCal ? calConfigs.data() : g_bLogo ? logoConfigs : g_bAfterNR ? afterNRConfigs : g_bVPTurns ? vpTurnConfigs : g_bClean ? cleanConfigs
-		: g_bChroma ? chromaConfigs : g_bScalers ? scalerConfigs : dlssConfigs;
+		: g_bChroma ? (g_bEwa ? ewaConfigs : chromaConfigs) : g_bScalers ? scalerConfigs : dlssConfigs;
 	const int configCount = (int)(g_bSharpenCal ? calConfigs.size() : g_bLogo ? std::size(logoConfigs) : g_bAfterNR ? std::size(afterNRConfigs) : g_bVPTurns ? std::size(vpTurnConfigs)
-		: g_bClean ? std::size(cleanConfigs) : g_bChroma ? std::size(chromaConfigs)
+		: g_bClean ? std::size(cleanConfigs) : g_bChroma ? (g_bEwa ? std::size(ewaConfigs) : std::size(chromaConfigs))
 		: g_bScalers ? std::size(scalerConfigs) : std::size(dlssConfigs));
 
 	printf("Film %ldx%ld at %.3f fps in a %ldx%ld window, %d s per configuration after 5 s to settle.\n",
@@ -3080,7 +3214,8 @@ int wmain(int argc, wchar_t* argv[])
 		printf("against the clean picture's; block: its steps across the 8-pixel grid over its steps\n");
 		printf("elsewhere, both ways (1.00: none).\n\n");
 	} else if (g_bChroma) {
-		printf("BT.709, limited range, chroma sited left, shown at 1:1 with the dither off.\n");
+		printf(g_chromaScale > 1 ? "BT.709, limited range, chroma sited left, shown at twice its size with the dither off.\n"
+			: "BT.709, limited range, chroma sited left, shown at 1:1 with the dither off.\n");
 		printf("psnr-c: Cb and Cr of the displayed picture against the 4:4:4 one; psnr-e: the\n");
 		printf("same where the luma has edges, where bleeding shows; offset: the constant\n");
 		printf("shift of Cb and Cr, in 8-bit levels.\n\n");
@@ -3119,6 +3254,9 @@ int wmain(int argc, wchar_t* argv[])
 			printf("   FAILED: %s\n", r.error.c_str());
 			failures++;
 			continue;
+		}
+		if (r.bSnapshotChanged) {
+			failures++;
 		}
 		if (g_bSharpenCal) {
 			if (r.picture.empty()) {
@@ -3314,12 +3452,24 @@ int wmain(int argc, wchar_t* argv[])
 				firstPicture = r.picture;
 				firstW = r.pictureW;
 				firstH = r.pictureH;
-				printf("   this is the reference the others are measured against\n\n");
-				printf("   %-36s %8s %8s %9s %13s\n", "", "psnr-c", "psnr-e", "psnr-rgb", "offset Cb/Cr");
+				printf("   this is the reference the others are measured against\n");
+				const bool bFull = g_refFullW == r.pictureW && g_refFullH == r.pictureH;
+				if (bFull) {
+					const ChromaMetrics f = ScoreChroma(r.picture, g_refFull, r.pictureW, r.pictureH);
+					printf("   against the file's own picture: psnr-c %.2f, psnr-e %.2f, psnr-rgb %.2f\n",
+						f.psnrChroma, f.psnrEdges, f.psnrRgb);
+				}
+				printf("\n   %-36s %8s %8s %9s %13s%s\n", "", "psnr-c", "psnr-e", "psnr-rgb", "offset Cb/Cr",
+					bFull ? "   | file: psnr-c psnr-e psnr-rgb" : "");
 			} else if (r.pictureW == firstW && r.pictureH == firstH) {
 				const ChromaMetrics m = ScoreChroma(r.picture, firstPicture, firstW, firstH);
-				printf("   %-36s %8.2f %8.2f %9.2f  %+6.2f/%+6.2f\n", config.name,
+				printf("   %-36s %8.2f %8.2f %9.2f  %+6.2f/%+6.2f", config.name,
 					m.psnrChroma, m.psnrEdges, m.psnrRgb, m.offsetCb, m.offsetCr);
+				if (g_refFullW == r.pictureW && g_refFullH == r.pictureH) {
+					const ChromaMetrics f = ScoreChroma(r.picture, g_refFull, r.pictureW, r.pictureH);
+					printf("   | %12.2f %6.2f %9.2f", f.psnrChroma, f.psnrEdges, f.psnrRgb);
+				}
+				printf("\n");
 			}
 			continue;
 		}

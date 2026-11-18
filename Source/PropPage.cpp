@@ -345,6 +345,8 @@ HRESULT CVRMainPPage::OnActivate()
 	// brought from 1080p to 4K (tools/dlssnr_probe, --tchroma and --tupscale, the
 	// tables in README-DLSS5.md). The number each entry carries is what is saved, so
 	// the order can change without moving anybody's setting.
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"EWA Lanczos Sharp",  CHROMA_EwaLanczosSharp);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"EWA Ginseng",        CHROMA_EwaGinseng);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Jinc (EWA)",         CHROMA_Jinc);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"RAVU-zoom",          CHROMA_RAVU);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Catmull-Rom",        CHROMA_CatmullRom);
@@ -353,6 +355,7 @@ HRESULT CVRMainPPage::OnActivate()
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO5, L"Nearest-neighbor",   CHROMA_Nearest);
 
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"ArtCNN C4F16 DS",    UPSCALE_ArtCNN);
+	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"Anime4K CNN x2 M AR", UPSCALE_Anime4KAR);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"RAVU-zoom",          UPSCALE_RAVUZoom);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"FSRCNNX 16 AR",      UPSCALE_FSRCNNX16AR);
 	ComboBox_AddStringData(m_hWnd, IDC_COMBO2, L"FSRCNNX 8 AR",       UPSCALE_FSRCNNX8AR);

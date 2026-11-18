@@ -108,7 +108,9 @@ static const ScalingShaderResId s_Upscaling11ResIDs[UPSCALE_COUNT] = {
 	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 8 AR"      },
 	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"FSRCNNX 16 AR"     },
 	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"ArtCNN C4F16 DS"   },
+	{IDF_PS_11_INTERP_CATMULL4_X,  IDF_PS_11_INTERP_CATMULL4_Y,  L"Anime4K CNN x2 M AR"},
 };
+static_assert(UPSCALE_COUNT == 13, "a line above for each Upscaling method");
 
 static const ScalingShaderResId s_Downscaling11ResIDs[DOWNSCALE_COUNT] = {
 	{IDF_PS_11_CONVOL_BOX_X,       IDF_PS_11_CONVOL_BOX_Y,       L"Box"          },
@@ -433,6 +435,7 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_iUpscalingInUse      = config.iUpscaling;
 	m_iDownscaling         = config.iDownscaling;
 	m_bUseDither           = config.bUseDither;
+	m_bDitherMoving        = config.bDitherMoving;
 	m_bDeintBlend          = config.bDeintBlend;
 	m_iSwapEffect          = config.iSwapEffect;
 	m_bVBlankBeforePresent = config.bVBlankBeforePresent;
@@ -468,6 +471,9 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	// Only Configure() used to take it, so the renderer made for each film had it on
 	// whatever the setting said: unticked, it stayed off until the next file.
 	m_bDlssRenderAhead     = config.bDlssRenderAhead;
+	m_iCadenceSlips        = config.iCadenceSlips;
+	m_PresentSchedule.SetCadenceSlips(m_iCadenceSlips);
+	m_bSwapChainRenew      = config.bSwapChainRenew;
 
 	m_nCurrentAdapter = -1;
 
@@ -742,8 +748,10 @@ void CDX11VideoProcessor::ReleaseVP()
 	m_DlssSR.ReleaseFeature();
 	m_DlssSRMotion.Release();
 	m_SRCutReadback.Release();
+	m_HdrTraceReadback.Release();
 	m_RenderAhead.Reset();
 	m_DlssNRTimes.Reset();
+	CadenceReset();
 
 	m_TexMpvLuma.Release();
 	m_TexMpvResize.Release();
@@ -786,6 +794,7 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_DlssStageTimes.Release();
 	m_pVPTimingProbe.Release();
 	m_pPictureDoneQuery.Release();
+	CadenceRelease();
 	ReleaseVPScale();
 	m_D3D11VPScale.ReleaseVideoDevice();
 	m_D3D11VP.ReleaseVideoDevice();
@@ -886,6 +895,7 @@ void CDX11VideoProcessor::ReleaseDevice()
 
 void CDX11VideoProcessor::ReleaseSwapChain()
 {
+	m_DwmKeepAlive.Stop();
 	if (m_pDXGISwapChain1) {
 		m_pDXGISwapChain1->SetFullscreenState(FALSE, nullptr);
 	}
@@ -895,6 +905,8 @@ void CDX11VideoProcessor::ReleaseSwapChain()
 	// The next one counts its refreshes and its Presents from nothing.
 	m_PresentSchedule.Reset();
 	m_bScheduled = false;
+	m_tickSwapChainRenewed = 0;
+	m_bSwapChainRenewGivenUp = false;
 
 	m_MaxDisplayLuminance = 0;
 }
@@ -1106,6 +1118,32 @@ void CDX11VideoProcessor::UpdateSharpenDitherShader()
 	}
 }
 
+// The dither's pattern moved by whole cells, 11 across and 19 down more each picture, so
+// that every pixel meets another threshold of the matrix from one picture to the next.
+// A still gradient is then seen as the average of several, which is nearer the value
+// the picture had than any one of them: over eight pictures, 0.40 of a step off with
+// the pattern held still and 0.16 with it moving (dlssnr_harness --tdither, which runs
+// this same sequence through the shipped shader). Asked by the step that dithers each time
+// a picture is finished, and moved on with each new picture of the film (m_rtStart), not
+// with each drawing of one: a paused picture drawn again, or rendered for a snapshot, keeps
+// its pattern, and the screen stays as it was (playback_test --aftergrab).
+void CDX11VideoProcessor::NextDitherOffset(float& x, float& y)
+{
+	if (!m_bDitherMoving) {
+		x = y = 0.0f;
+		return;
+	}
+	if (m_rtStart != m_rtDitherPicture) {
+		if (m_bDitherPictureKnown) {
+			m_nDitherPicture++;
+		}
+		m_rtDitherPicture = m_rtStart;
+		m_bDitherPictureKnown = true;
+	}
+	x = (float)((m_nDitherPicture * 11) % dither_size) / dither_size;
+	y = (float)((m_nDitherPicture * 19) % dither_size) / dither_size;
+}
+
 // The peak that the HDR to SDR conversion maps onto the display's white: what the file claims,
 // clamped to something usable.  0 means the Fixed method, which leaves the fixed curve in place.
 float CDX11VideoProcessor::GetSdrToneMappingPeak() const
@@ -1246,9 +1284,11 @@ void CDX11VideoProcessor::ReleaseHdrMeasure()
 {
 	m_bSdrMeasureActive = false;
 	m_bHdrLocalMeasureActive = false;
+	m_bRtxHdrMeasureActive = false;
 	m_bHdrStatsCopyPending = false;
 	m_fHdrMeasuredPeakNits = 0.0f;
 	m_fHdrSmoothedPeakNits = 0.0f;
+	m_fHdrMeasuredAvgNits = 0.0f;
 
 	m_pHdrStateStaging.Release();
 	m_pHdrResolveConstants.Release();
@@ -1266,9 +1306,12 @@ void CDX11VideoProcessor::ReleaseHdrMeasure()
 // m_pHdrStateBuffer, where the measuring variant of the conversion shader picks it up.
 HRESULT CDX11VideoProcessor::MeasureHdrPeak(const Tex2D_t& tex, const CRect& rect)
 {
-	if (!(m_bSdrMeasureActive || m_bHdrLocalMeasureActive) || !m_pHdrStateBuffer || !tex.pShaderResource) {
+	if (!(m_bSdrMeasureActive || m_bHdrLocalMeasureActive || m_bRtxHdrMeasureActive) || !m_pHdrStateBuffer || !tex.pShaderResource) {
 		return E_ABORT;
 	}
+	// RTX Video HDR's output is only reported, and a floor would report a peak the driver
+	// never wrote.
+	const bool bForCurve = m_bSdrMeasureActive || m_bHdrLocalMeasureActive;
 
 	CRect r;
 	r.IntersectRect(rect, CRect(0, 0, tex.desc.Width, tex.desc.Height));
@@ -1290,7 +1333,7 @@ HRESULT CDX11VideoProcessor::MeasureHdrPeak(const Tex2D_t& tex, const CRect& rec
 	// that is wanted.  madVR never restarts it, so off is what matches madVR.
 	const HdrResolveConstants_t resolveConstants = {
 		frameTime, kHdrReleaseSeconds, m_bSdrPeakSceneCuts ? kHdrSceneCutPQ : kHdrNoSceneCutPQ, kHdrPeakFraction,
-		m_iSdrPeakWindowMs / 1000.0f, static_cast<float>(m_iSdrPeakFloorNits)
+		m_iSdrPeakWindowMs / 1000.0f, bForCurve ? static_cast<float>(m_iSdrPeakFloorNits) : 0.0f
 	};
 	m_pDeviceContext->UpdateSubresource(m_pHdrMeasureConstants, 0, nullptr, &measureConstants, 0, 0);
 	m_pDeviceContext->UpdateSubresource(m_pHdrResolveConstants, 0, nullptr, &resolveConstants, 0, 0);
@@ -1320,6 +1363,12 @@ HRESULT CDX11VideoProcessor::MeasureHdrPeak(const Tex2D_t& tex, const CRect& rec
 	m_pDeviceContext->CSSetUnorderedAccessViews(0, 2, pNullUAVs, nullptr);
 	m_pDeviceContext->CSSetShader(nullptr, nullptr, 0);
 
+	// The picture's measurement in the pacing trace, when one is written: the head of the
+	// state, the window's count included.
+	if (m_PacingTrace.Enabled()) {
+		m_HdrTraceReadback.Copy(m_pDevice, m_pDeviceContext, m_pHdrStateBuffer, m_rtStart, 5 * 4 * sizeof(float));
+	}
+
 	return S_OK;
 }
 
@@ -1338,6 +1387,7 @@ void CDX11VideoProcessor::ReadHdrMeasureStats()
 			const float* p = static_cast<const float*>(mr.pData); // see the layout in cs_hdr_resolve.hlsl
 			m_fHdrMeasuredPeakNits = p[4];
 			m_fHdrSmoothedPeakNits = p[6];
+			m_fHdrMeasuredAvgNits = p[7];
 			m_pDeviceContext->Unmap(m_pHdrStateStaging, 0);
 			m_bHdrStatsCopyPending = false;
 		} else if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
@@ -1636,6 +1686,15 @@ void CDX11VideoProcessor::UpdateTexParams(int cdepth)
 
 	switch (m_iTexFormat) {
 	case TEXFMT_AUTOINT:
+		// HDR output in half floats. Every step that writes a 10-bit texture rounds the
+		// picture again, and the rounding is not dithered: a 10-bit chain of a few steps
+		// leaves two to five times the banding of half floats dithered once on the way
+		// to the 10-bit swap chain (dlssnr_harness --tdither, on PQ ramps in the shadows
+		// and in the highlights). The same test as the swap chain's (InitSwapChain).
+		if (m_bHdrPassthroughSupport && (m_bHdrPassthrough || m_bHdrLocalToneMapping) && (SourceIsHDR() || m_bVPUseRTXVideoHDR)) {
+			m_InternalTexFmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+			break;
+		}
 		m_InternalTexFmt = (cdepth > 8 || m_bVPUseRTXVideoHDR) ? DXGI_FORMAT_R10G10B10A2_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
 		break;
 	case TEXFMT_8INT:    m_InternalTexFmt = DXGI_FORMAT_B8G8R8A8_UNORM;     break;
@@ -2142,6 +2201,12 @@ HRESULT CDX11VideoProcessor::InitSwapChain(bool bWindowChanged)
 		m_UsedSwapEffect = desc1.SwapEffect;
 
 		HRESULT hr2 = m_pDXGISwapChain1->GetContainingOutput(&m_pDXGIOutput);
+		if (!m_bExclusiveScreen) {
+			CComPtr<IDXGIAdapter> pAdapter;
+			if (CComQIPtr<IDXGIDevice> pDXGIDevice = m_pDevice.p; pDXGIDevice && SUCCEEDED(pDXGIDevice->GetAdapter(&pAdapter))) {
+				m_DwmKeepAlive.Start(m_hWnd, pAdapter);
+			}
+		}
 
 		m_currentSwapChainColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 		if (bHdrOutput) {
@@ -2607,6 +2672,7 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	// Tex Video Processor
 	if (FAILED(hr) && FmtParams.DX11Format != DXGI_FORMAT_UNKNOWN) {
 		m_bVPUseRTXVideoHDR = false;
+		m_bRtxHdrMeasureActive = false;
 		hr = InitializeTexVP(FmtParams, origW, origH);
 		if (SUCCEEDED(hr)) {
 			SetShaderConvertColorParams();
@@ -2679,6 +2745,10 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 
 	auto rtxHDR = m_bVPRTXVideoHDR && m_bHdrPassthroughSupport && (m_bHdrPassthrough || m_bHdrLocalToneMapping) && m_iTexFormat != TEXFMT_8INT && !SourceIsHDR();
 	m_bVPUseRTXVideoHDR = (m_D3D11VP.SetRTXVideoHDR(rtxHDR) == S_OK);
+	// What the driver then writes is measured for the statistics (see Process). Two
+	// small buffers and two compute shaders, shared with the HDR measurements, which a
+	// source the driver tone maps (SDR) never needs at the same time.
+	m_bRtxHdrMeasureActive = m_bVPUseRTXVideoHDR && HdrMeasureSupported() && SUCCEEDED(InitHdrMeasure());
 
 	// The 4:4:4 pre-pass used to switch it off here, which cost a capability the
 	// original has for an option of ours; the driver is left to answer for itself.
@@ -3484,6 +3554,8 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		m_bDlssSRNewPicture = true;
 	}
 
+	RenewSwapChainIfStuck();
+
 	CComPtr<ID3D11Texture2D> pBackBuffer;
 	HRESULT hr = m_pDXGISwapChain1->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
 	if (FAILED(hr)) {
@@ -3621,32 +3693,24 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		hr = Process(pBackBuffer, m_srcRect, m_videoRect, m_FieldDrawn == 2);
 	}
 
+	// The picture as drawn, before anything goes over it, for the cadence slips: whether
+	// it opens a shot, and what a picture made before it would be made from. Timed with
+	// the steps before it, while the statistics show.
+	m_bCadenceMeasured = false;
+	const bool bCadence = field && frameStartTime != INVALID_TIME && CadenceActive() && !m_renderRect.IsRectEmpty();
+	if (bCadence && !m_bCadenceWasActive) {
+		CadenceReset();   // the last picture it kept may be from long before
+	}
+	m_bCadenceWasActive = bCadence;
+	if (bCadence) {
+		m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::Cadence);
+		CadenceTakePicture(pBackBuffer);
+		m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::Cadence);
+	}
+
 	m_DlssStageTimes.EndFrame(m_pDeviceContext);   // nothing to do when no set is open
 
-	if (!m_pPSHalfOUtoInterlace) {
-		DrawSubtitles(pBackBuffer);
-	}
-
-	if (m_bShowStats) {
-		hr = DrawStats(pBackBuffer);
-	}
-	DrawNotice(pBackBuffer);
-
-	if (m_bAlphaBitmapEnable) {
-		D3D11_TEXTURE2D_DESC desc;
-		pBackBuffer->GetDesc(&desc);
-		D3D11_VIEWPORT VP = {
-			m_AlphaBitmapNRectDest.left * desc.Width,
-			m_AlphaBitmapNRectDest.top * desc.Height,
-			(m_AlphaBitmapNRectDest.right - m_AlphaBitmapNRectDest.left) * desc.Width,
-			(m_AlphaBitmapNRectDest.bottom - m_AlphaBitmapNRectDest.top) * desc.Height,
-			0.0f,
-			1.0f
-		};
-		hr = AlphaBlt(m_TexAlphaBitmap.pShaderResource, pBackBuffer,
-			m_pAlphaBitmapVertex, &VP,
-			m_pSamplerLinear);
-	}
+	DrawOverlays(pBackBuffer, hr);
 
 #if 0
 	{ // Tearing test (very non-optimal implementation, use only for tests)
@@ -3691,6 +3755,9 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		});
 		m_DlssStageTimes.Take([this](const CGpuStageTimes::Measured& measured) {
 			m_PacingTrace.SetGpu(measured.tag, measured.vpMs, measured.allMs);
+		});
+		m_HdrTraceReadback.Collect(m_pDeviceContext, [this](long long rtStart, const float* state) {
+			m_PacingTrace.SetHdr(rtStart, state);
 		});
 	}
 	const bool bTrace = m_PacingTrace.Enabled() && field && frameStartTime != INVALID_TIME;
@@ -3739,7 +3806,10 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 			// thread does not wait for.
 			const double drawMs = std::max((double)(tickNow - (long long)tick1) * 1000.0 / GetPreciseTicksPerSecond(),
 				m_RenderAhead.MaxLatencyMs());
+			// What a made picture would take now, with the margin CadencePresentMade allows it.
+			m_PresentSchedule.SetMadeMs(m_iCadenceSlips == CADENCE_SLIPS_OnCutOrMade && m_bCadenceMakeReady ? CadenceEchoMs() + 1.0 : 0.0);
 			plan = m_PresentSchedule.Choose(tickNow, tickDue, frameMs, drawMs);
+			CadenceUpdateAhead();
 			// A second field belongs to its sample, and the sample is all that can be left out.
 			if (plan.bSkipNext && !m_bDoubleFrames) {
 				m_bSkipNextSample = true;
@@ -3775,6 +3845,17 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		return hr;
 	}
 
+	// A cadence slip that no cut came in time for: the refresh it adds shows a picture
+	// made between the last one and this one, and this one follows it on the next.
+	bool bMadeShown = false;
+	m_bCadenceMadeQueued = false;
+	if (plan.bValid && plan.bSlipForced && plan.bSlipMade) {
+		bMadeShown = CadencePresentMade(plan, pBackBuffer, field == 1, bTrace, traced);
+		if (!pBackBuffer) {
+			return E_FAIL;
+		}
+	}
+
 	// Without a refresh to aim at -- DXGI has not said where they are, or the setting
 	// is off -- a picture a DLSS pass or a prescaler worked on is still held for its
 	// time on the reference clock, as before.
@@ -3786,7 +3867,35 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 
 	if (plan.bValid) {
 		// Only the first picture of a sample is started early; a second field follows it.
-		WaitForScheduledPresent(plan, field == 1);
+		WaitForScheduledPresent(plan, field == 1 && !m_bCadenceMadeQueued);
+		// A cadence slip waiting for a cut: this picture is one or it is not, which the
+		// GPU has said by now if it is done with it. A cut takes the slip -- the refresh
+		// more, or the picture less at a film's own rate.
+		if (plan.bSlipIfCut || plan.bSlipNextIfCut || plan.bDropIfCut) {
+			const int cut = CadenceReadCut(bTrace ? &traced : nullptr);
+			m_PresentSchedule.ApplyCut(plan, cut == 1);
+			if (bTrace && plan.bSlipOnCut) {
+				traced.flags |= plan.bDrop ? (CPacingTrace::Dropped | CPacingTrace::SlipOnCut) : 0;
+				traced.tickTarget = plan.tickRefresh;
+			}
+			if (plan.bDrop) {
+				m_tickOnScreen = 0;
+				if (bTrace) {
+					traced.tickGpuDone = (long long)m_tickPictureDone;
+					ReadShownForTrace(traced.after);
+					m_PacingTrace.Add(traced);
+				}
+				return hr;
+			}
+			if (plan.bSlipOnCut) {
+				WaitUntilTick(plan.tickCall);
+			}
+		} else if (m_bCadenceMeasured) {
+			CadenceReadCut(bTrace ? &traced : nullptr);   // for the trace
+		}
+		if (bTrace) {
+			traced.flags |= (plan.bSlipForced ? CPacingTrace::SlipForced : 0) | (plan.bSlipOnCut ? CPacingTrace::SlipOnCut : 0);
+		}
 	} else {
 		// Upstream's two ways of timing Present are for render ahead off. Render ahead
 		// never waits for a vertical blank, which puts the call where a refresh is worst
@@ -3832,7 +3941,8 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		UINT presentId = 0;
 		if (SUCCEEDED(m_pDXGISwapChain1->GetLastPresentCount(&presentId))) {
 			m_PresentSchedule.Presented(presentId, plan, (long long)m_tickPresentCall,
-				(double)(tick3 + m_RenderStats.presentticks - m_tickPresentCall) * 1000.0 / GetPreciseTicksPerSecond());
+				(double)(tick3 + m_RenderStats.presentticks - m_tickPresentCall) * 1000.0 / GetPreciseTicksPerSecond(),
+				m_tickPictureDone != 0);
 		}
 		ReadPresentSchedule();
 		// Where it will be on the screen against where its time is: the offset that
@@ -4395,7 +4505,8 @@ HRESULT CDX11VideoProcessor::FinalPass(const Tex2D_t& Tex, ID3D11Texture2D* pRen
 		return hr;
 	}
 
-	const FLOAT constants[4] = { (float)Tex.desc.Width / dither_size, (float)Tex.desc.Height / dither_size, 0, 0 };
+	FLOAT constants[4] = { (float)Tex.desc.Width / dither_size, (float)Tex.desc.Height / dither_size, 0, 0 };
+	NextDitherOffset(constants[2], constants[3]);
 	D3D11_MAPPED_SUBRESOURCE mr;
 	hr = m_pDeviceContext->Map(m_pFinalPassConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr);
 	if (FAILED(hr)) {
@@ -4513,6 +4624,18 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 		pInputTexture = &m_TexConvertOutput;
 		rSrc = rect;
 		rotation = 0;
+
+		// RTX Video HDR: how bright the driver really made the picture, read where it
+		// wrote it, before anything of ours touches it. The NVIDIA app sets a peak, and
+		// the display reports one of its own; a renderer that tone maps the driver's
+		// output to the second changes the picture wherever the driver goes past it.
+		// For the statistics only, while they are shown: nothing reads the result, and
+		// its two dispatches are in none of the steps' times.
+		if (m_bRtxHdrMeasureActive && m_bShowStats && bAllowDlss) {
+			if (MeasureHdrPeak(m_TexConvertOutput, rect) == S_OK) {
+				ReadHdrMeasureStats();
+			}
+		}
 	}
 	else if (m_PSConvColorData.bEnable) {
 		// An mpv prescaler's chroma included: the statistics give the step one figure.
@@ -4709,13 +4832,16 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			// Taking the dither on, it reads the dither where FinalPass would: the scale
 			// FinalPass is given, for the picture it reads, at the same coordinates.
 			const bool bDither = SharpenTakesDither();
-			const FLOAT constants[12] = {
+			FLOAT constants[12] = {
 				(float)pTex->desc.Width, (float)pTex->desc.Height,
 				1.0f / pTex->desc.Width, 1.0f / pTex->desc.Height,
 				1.0f, 1.0f,
 				m_fSharpenTestStrength > 0 ? m_fSharpenTestStrength : s_SharpenStrength[method][level - 1], s_SharpenClamp,
 				(float)pTex->desc.Width / dither_size, (float)pTex->desc.Height / dither_size, 0, 0
 			};
+			if (bDither) {
+				NextDitherOffset(constants[10], constants[11]);
+			}
 			D3D11_MAPPED_SUBRESOURCE mr = {};
 			if (SUCCEEDED(m_pDeviceContext->Map(m_pSharpenConstants, 0, D3D11_MAP_WRITE_DISCARD, 0, &mr))) {
 				memcpy(mr.pData, constants, sizeof(constants));
@@ -4980,7 +5106,13 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 			UpdateConvertColorShader();
 		}
 
-		if (m_bHdrPassthroughSupport && m_bHdrLocalToneMapping) {
+		// Only for an HDR source, the one the tone mapping was released from above. HDR
+		// output also comes from RTX Video HDR on an SDR source, which has no tone mapping
+		// and never gets its constants (SetHDR10ShaderParams reads the source's HDR10 or
+		// Dolby Vision metadata): with a tone map method chosen, a snapshot used to leave
+		// the shader behind for the rest of the film, run on the driver's output with its
+		// parameters all zero.
+		if (m_bHdrPassthroughSupport && m_bHdrLocalToneMapping && SourceIsHDR()) {
 			EXECUTE_ASSERT(S_OK == CreateHDR10ToneMappingShader());
 			DLogIf(m_pPSHDR10ToneMapping, L"CDX11VideoProcessor::InitMediaType() m_pPSHDR10ToneMapping(type: '{}') created", m_iHdrLocalToneMappingType);
 		}
@@ -5355,6 +5487,14 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		m_bScheduled = false;
 		UpdateStatsPresent();
 	}
+	m_bSwapChainRenew = config.bSwapChainRenew;   // read at the next stuck flip
+	if (config.iCadenceSlips != m_iCadenceSlips) {
+		// The pictures keep the cadence they have; only where its next slip goes changes.
+		m_iCadenceSlips = config.iCadenceSlips;
+		m_PresentSchedule.SetCadenceSlips(m_iCadenceSlips);
+		CadenceReset();
+		UpdateStatsPresent();
+	}
 
 	if (config.iTexFormat != m_iTexFormat) {
 		m_iTexFormat = config.iTexFormat;
@@ -5459,6 +5599,8 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		m_bUseDither = config.bUseDither;
 		changeNumTextures = m_InternalTexFmt != DXGI_FORMAT_B8G8R8A8_UNORM;
 	}
+	// read with each picture, nothing to rebuild
+	m_bDitherMoving = config.bDitherMoving;
 
 	if (config.iSwapEffect != m_iSwapEffect) {
 		m_iSwapEffect = config.iSwapEffect;
@@ -5717,6 +5859,7 @@ void CDX11VideoProcessor::Flush()
 	m_rtStart = 0;
 	m_bSkipNextSample = false;
 	m_PresentSchedule.Flush();
+	CadenceReset();
 	if (m_PacingTrace.Enabled()) {
 		m_PacingTrace.Note(L"flush");
 	}
@@ -5835,6 +5978,10 @@ void CDX11VideoProcessor::UpdateStatsPresent()
 		if (m_nSwapChainResizeFailed) {
 			m_strStatsPresent.append(std::format(L"rebuilt after {} refused resize(s), ", m_nSwapChainResizeFailed));
 		}
+		if (m_nSwapChainRenewed) {
+			m_strStatsPresent.append(std::format(L"renewed {} time(s) for skipped flips{}, ", m_nSwapChainRenewed,
+				m_bSwapChainRenewGivenUp ? L" (no longer)" : L""));
+		}
 		switch (swapchain_desc.SwapEffect) {
 		case DXGI_SWAP_EFFECT_DISCARD:
 			m_strStatsPresent.append(L"Discard");
@@ -5861,6 +6008,13 @@ void CDX11VideoProcessor::UpdateStatsPresent()
 			if (swapchain_desc.SwapEffect != DXGI_SWAP_EFFECT_DISCARD
 					&& swapchain_desc.SwapEffect != DXGI_SWAP_EFFECT_SEQUENTIAL) {
 				m_strStatsPresent.append(L"\nFrame sync    : a refresh chosen for each picture");
+				// Where the cadence slips (iCadenceSlips), within the 80 columns of the rules: the
+				// pipeline's EchoFG line says why there are no interpolated frames, when there are none.
+				if (m_iCadenceSlips == CADENCE_SLIPS_OnCut || (m_iCadenceSlips == CADENCE_SLIPS_OnCutOrMade && m_bCadenceMakeFailed)) {
+					m_strStatsPresent.append(L", hiccups hidden");
+				} else if (m_iCadenceSlips == CADENCE_SLIPS_OnCutOrMade) {
+					m_strStatsPresent.append(L", hiccups hidden/interpolated");
+				}
 			} else {
 				m_strStatsPresent.append(L"\nFrame sync    : held to its time");
 			}

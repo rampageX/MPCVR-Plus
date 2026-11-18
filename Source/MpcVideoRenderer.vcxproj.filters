@@ -63,6 +63,9 @@
     <ClCompile Include="DLSS\DlssTiming.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DLSS\DwmKeepAlive.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Upscale\MpvShader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -91,6 +94,18 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DX11VideoProcessorPresent.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Cadence\SceneCut.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FrameGen\echo\EchoFlow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FrameGen\echo\EchoSynth11.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DX11VideoProcessorCadence.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DX11VideoProcessorStats.cpp">
@@ -221,6 +236,15 @@
     <ClInclude Include="Logo\LogoWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Cadence\SceneCut.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FrameGen\echo\EchoFlow.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="FrameGen\echo\EchoSynth11.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DLSS\DlssOpticalFlow.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -243,6 +267,9 @@
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\DlssTiming.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DLSS\DwmKeepAlive.h">
       <Filter>Source Files</Filter>
     </ClInclude>
     <ClInclude Include="DLSS\NgxRuntime.h">
@@ -330,6 +357,9 @@
       <Filter>Utils</Filter>
     </ClInclude>
     <ClInclude Include="MediaSampleSideData.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="NvidiaAppSettings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Utils\gpu_memcpy_sse4.h">

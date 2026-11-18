@@ -6,8 +6,8 @@ rendering is bit-identical to upstream.
 
 | | |
 |---|---|
-| **Scaling** | six upscalers chosen by measurement — ArtCNN C4F16 DS, FSRCNNX 8/16, RAVU-zoom and the anti-ringing versions — with both lists ordered best first |
-| **Chroma** | three more methods, and a 4:4:4 pre-pass that hands the hardware video processor a full picture: +7 dB of colour on 10-bit film |
+| **Scaling** | seven upscalers chosen by measurement — ArtCNN C4F16 DS, Anime4K CNN x2 M, FSRCNNX 8/16, RAVU-zoom and the anti-ringing versions — with both lists ordered best first |
+| **Chroma** | six more methods, libplacebo's EWA Lanczos Sharp the default, and a 4:4:4 pre-pass that hands the hardware video processor a full picture: +7 dB of colour on 10-bit film |
 | **Detail** | deblocking (PP7, or SPP for a powerful GPU) and debanding on the decoded planes, and sharpening after the resize, each with five calibrated levels; a TV channel's logo found and hidden |
 | **DLSS 5 NR** | NVIDIA neural reconstruction (NGX feature 18) with a temporal stabilizer made for video |
 | **DLSS SR** | DLSS Super Resolution 4.5 for enlarging, and DLAA at native size (experimental) |
@@ -75,7 +75,11 @@ player in its own way.
 
 - **MPC-BE** uses the renderer registered in Windows. `Install_MPCVR_64.cmd`, run as
   administrator, registers this one. Installing or updating MPC-BE registers its own copy
-  again, and the last one registered is the one used.
+  again, and the last one registered is the one used. Putting `MpcVideoRenderer64.ax` in
+  place of the one in MPC-BE's `Filters` folder also works, with no registering: since 3.0
+  the settings page answers to the identifier of the original's own page, which MPC-BE
+  registered. Before, MPC-BE, which makes a filter's pages through Windows, found nothing
+  under the page's identifier of its own and left the settings out, showing the other pages.
 - **MPC-HC** uses the copy in its own folder first, `MPCVR\MpcVideoRenderer64.ax` beside
   `mpc-hc64.exe`, and a registered renderer only when that copy is not there: registering
   MPCVR-Plus changes nothing in MPC-HC. Put `MpcVideoRenderer64.ax` and the `dlss` folder in
@@ -195,7 +199,7 @@ trace (see *Diagnostic tools*).
 
 ### What it was put through
 
-In MPC-HC, a 1080p film at 25 fps on a television at 25 Hz, with the trace saying for every
+In MPC-HC, a 1080p film at 25 fps on a television at 25Hz, with the trace saying for every
 picture whether DLSS 5 NR ran on it: the toggle key while playing, while paused, and three
 times within a second; seeks short and long, forwards and back, three in half a second;
 subtitles next, off and on; another sound track; pause and play; out of fullscreen and back;
@@ -313,7 +317,7 @@ composition, waited for:
 
 The reduction takes 0.35 to 1.0 ms and the composition 0.4 to 1.1.
 
-And in MPC-HC, 40 s of each film from 10 minutes in, the television at 24 Hz, with the trace
+And in MPC-HC, 40 s of each film from 10 minutes in, the television at 24Hz, with the trace
 (`pacing_report.py --dlss`). A picture is drawn in the time the network takes and 11 to 16 ms
 more -- the decoded 4K HDR picture converted, Optical Flow, the stabilizer, the composition --
 and one that does not fit the 41.7 ms a picture lasts is left out undrawn:
@@ -765,15 +769,16 @@ decide whether its cleaner look is worth it on your films.
 
 ---
 
-## Upscaling: FSRCNNX, RAVU-zoom and ArtCNN
+## Upscaling: FSRCNNX, RAVU-zoom, ArtCNN and Anime4K
 
 The **Upscaling** and **Chroma upsampling** lists are ordered by what they measured,
-best first, on 1080p film brought to 4K. Six of the entries enlarge one plane with a small
+best first, on 1080p film brought to 4K. Seven of the entries enlarge one plane with a small
 network instead of a filter kernel, the way mpv's prescalers do:
 
 | Entry | What it is | 1080p→4K luma, RTX 3050 |
 |---|---|---|
 | **ArtCNN C4F16 DS** | ArtCNN C4F16 DS: four convolution layers in compute passes, doubles. Cleans grain and compression as it enlarges | 14.5 ms, 63 MB |
+| **Anime4K CNN x2 M AR** | Anime4K_Upscale_CNN_x2_M, v3.2: seven small convolution layers, doubles, with anti-ringing. Made for animation; on film it measures second on grain and compression and below RAVU-zoom and FSRCNNX on a clean picture (*Three more of mpv's networks* below) | see below |
 | **RAVU-zoom** | RAVU-Zoom-AR r3: trained edge-directed weights, to any size at once, anti-ringing inside the kernel | 3.9 ms, no extra texture |
 | **FSRCNNX 16 AR** | FSRCNNX_x2_16-0-4-1, 16 feature maps, doubles, with anti-ringing | 18.0 ms, 190 MB |
 | **FSRCNNX 8 AR** | FSRCNNX_x2_8-0-4-1, the same with 8, with anti-ringing | 5.9 ms, 95 MB |
@@ -822,6 +827,37 @@ a 1080p window had FSRCNNX 16 working at 7680x4320 for 93.4 ms a frame -- the sy
 out to +5 s with 18 frames late. The option that used to ask for it, *Use the "Upscaling"
 method to reduce the frame to 50%*, is gone with it: **the Downscaling method now reduces at
 every ratio**, which is the one thing it can be relied on to say.
+
+Three more of mpv's networks were measured (`dlssnr_harness --tupscale --mpvextra <dir>`: luma
+PSNR, mean of eleven film frames reduced by two, degraded, enlarged back; GPU times are the
+harness's at the reference size on an RTX 4060). One of them, **Anime4K**, is in the list since
+3.0; the other two are not:
+
+| | clean | grain | compressed | time |
+|---|---|---|---|---|
+| FSRCNNX 16 AR | **50.49** | 42.35 | 42.45 | 6.0 ms |
+| RAVU-zoom | 49.91 | 42.28 | 42.49 | 1.6 ms |
+| ArtCNN C4F16 DS, with anti-ringing | 47.89 | **45.09** | **42.96** | 4.9 ms |
+| AiUpscale Fast 2x Photo, with anti-ringing | 50.16 | 40.79 | 41.98 | 4.1 ms |
+| Anime4K CNN x2 M, with anti-ringing | 48.64 | 43.07 | 42.58 | 1.1 ms |
+
+**Anime4K**, made for animation and run on the luma given as grey (it reads RGB), is below
+FSRCNNX and RAVU-zoom on a clean picture and between them and ArtCNN on grain and compression,
+for a fifth of FSRCNNX's time; reduced by three it keeps the same order (44.99 clean, 41.19
+grain, 40.00 compressed, against FSRCNNX 16 AR's 46.14, 40.70 and 39.85). Film has grain or
+compression more often than not, which is how ArtCNN came first, and Anime4K comes second on
+the same grounds: *Anime4K CNN x2 M AR* sits between ArtCNN and RAVU-zoom. The filter gives
+every prescaler its luma as grey now, which changes nothing for the others (they read red), and
+runs Anime4K as the harness does, to the last half float (`--tmpvport`): 1.8 ms from 1080p to
+4K on an RTX 4060, where ArtCNN takes 6.4 ms, in eight textures, 127 MB. It comes with
+anti-ringing only, which at twice the size measured 0.4 dB better on a clean picture and 0.1 on
+a compressed one, and 0.03 worse on grain. Its last pass saves its result under the name of the
+plane it hooks, as mpv allows; the filter's runner took that for a texture of its own, and would
+never have counted the shader as run.
+
+**AiUpscale** comes close to FSRCNNX on a clean picture and falls behind wherever there is
+grain or compression, and is not offered. **CuNNy 2x12 DS** could not be measured: the
+harness's runner gives a flat picture for it, and why has not been found.
 
 ### Spline36, and what a downscaler is for
 
@@ -893,6 +929,17 @@ further out than rounding accounts for here, by up to 1.3 % of scale, where the 
 nowhere near a branch point and the sum barely cancels. It is two orders below anything a
 mistyped coefficient would do, so the check does not call it a failure -- it prints it, which
 is the honest state of it.
+
+Two of mpv's downscalers were measured the same way and are **not** offered: igv's
+**SSimDownscaler**, which works on what a downscaler made with the source beside it, and
+**DPID**, a detail-preserving downscaler (`--tdownscale --mpvextra <dir>` runs mpv shaders
+translated by `mpv_shaders.py` beside the shipped ones). Both keep what is in band -- 0.976 and
+0.999 at 0.375 cycles, where Lanczos keeps 0.881 -- by letting through almost everything that
+is not: 0.955 to 0.963 of a signal at 0.60 for SSimDownscaler (on Bicubic and on Hamming) and
+0.908 for DPID, against 0.178 for Lanczos and 0.467 for Hamming, the default. SSimDownscaler
+also rings, 0.10 to 0.16 past the edge. By the root mean square of the six errors they come last,
+0.455 to 0.568 against Lanczos's 0.087: sharpness bought with exactly the crawling the table is
+there to catch.
 
 ### Anti-ringing
 
@@ -983,8 +1030,76 @@ on line art (−6.7 dB) and is under Catmull-Rom on film; **CfL Prediction** win
 synthetic case where chroma is a linear function of luma, which no real film is. **NGU**, the
 one that beats everything on the doom9 test, is closed.
 
-The **defaults are unchanged**: Upscaling is Jinc2m and Chroma upsampling Catmull-Rom for a
-fresh installation, and settings already saved in the registry are left alone — each entry
+**libplacebo's other polar kernels**, which FrankyRenderer offers for chroma, were measured
+the same way, through the filter: the Jinc (EWA) entry takes any of them when
+`MPCVR_CHROMA_EWA` names it in the player's environment (a test hook, read as the conversion
+shader is written; unset, the entry is the Jinc it always was), each as libplacebo's
+`filters.c` defines it at the commit FrankyRenderer takes, with its polar anti-ringing for the
+one that has it (`playback_test --chroma <png> --ewa`). Six film frames at 1920x800 and the
+doom9 line-art test at its own 640x480, against Catmull-Rom:
+
+| Kernel | Cb/Cr | at luma edges | whole picture | line art, at edges |
+|---|---|---|---|---|
+| Jinc (EWA), the entry as it ships (`ewa_lanczos`) | −0.07 dB | +0.43 dB | −0.16 dB | +0.49 dB |
+| `ewa_lanczossharp`: the same, blurred by 0.981 | −0.08 dB | **+0.46 dB** | −0.17 dB | +0.60 dB |
+| `ewa_lanczos4sharpest`: four lobes, blurred by 0.885, anti-ringing 0.8 | **+0.11 dB** | +0.12 dB | **+0.10 dB** | **+1.04 dB** |
+| `ewa_ginseng`: jinc windowed by a sinc | −0.09 dB | +0.44 dB | −0.18 dB | +0.53 dB |
+| `ewa_hann`: jinc windowed by a Hann | −0.04 dB | +0.40 dB | −0.12 dB | +0.34 dB |
+| `ewa_robidouxsharp`: a polar cubic | −0.03 dB | +0.30 dB | −0.06 dB | +0.46 dB |
+| `ewa_robidoux`: the same, softer | +0.04 dB | −0.04 dB | +0.02 dB | −0.20 dB |
+| `ewa_jinc`: jinc with no window | −0.86 dB | −1.89 dB | −0.80 dB | −0.67 dB |
+
+Nothing is clearly better on film along the edges, where bleeding shows and what the list is
+ordered by. **EWA Lanczos Sharp** is the Jinc a little sharper and 0.03 dB above it there
+(between −0.01 and +0.07 from frame to frame), hundredths of an 8-bit level. **EWA Lanczos4
+Sharpest** keeps more colour over the whole picture and on drawn lines, and gives up 0.31 dB
+along the edges; on drawn lines RAVU-zoom, in the list already, is above it, +1.78 dB in the
+same run (FSRCNNX 8 AR +0.54, so the September table's line-art column, from another setup,
+does not carry over). The others are below the Jinc, and the unwindowed jinc below
+everything. An 800x450 crop of the same frames ranks them in the same order.
+
+Since 3.0 three of them are in the **Chroma upsampling** list beside the Jinc, measured the same
+through the list as through the hook: **EWA Lanczos Sharp**, the default for a fresh
+installation, **EWA Ginseng** and **EWA Lanczos4 Sharpest**, in that order with the Jinc between
+Ginseng and RAVU-zoom and Lanczos4 Sharpest after RAVU-zoom. Like the Jinc they need Direct3D 11
+and 4:2:0 in planes, Catmull-Rom standing in elsewhere. What they cost in the conversion shader,
+a 1920x1080 picture on the RTX 4060: Catmull-Rom 0.2 ms, the Jinc, EWA Lanczos Sharp and EWA
+Ginseng 0.4 ms, EWA Lanczos4 Sharpest 0.5 ms, against RAVU-zoom's 1.2 ms and FSRCNNX 8 AR's 1.4
+ms in passes of their own.
+
+**Enlarged from 1080p to 4K**, as a 1080p film is on a 4K screen, the order holds
+(`playback_test --chroma <png> --size 1920x800 --upscale --ewa`). Each frame is reduced from its
+4K original to 1920x800 and played as 4:2:0, its chroma rebuilt by each method, the picture
+enlarged by Catmull-Rom to 3840x1600 (the networks of the Upscaling list take their colour from
+Catmull-Rom too) with the sharpening off; it is scored against the 4:4:4 picture through the
+same enlargement, which leaves the chroma method alone to differ, and against the 4K original,
+which is what the eye should have seen. The line art, 640x480 to 1280x960, has no original of
+its own. Against Catmull-Rom, the mean of the six film frames:
+
+| Method | at luma edges, against 4:4:4 | Cb/Cr, against the 4K original | at luma edges, against the 4K original | line art, at edges |
+|---|---|---|---|---|
+| Jinc (EWA), as it ships | +0.52 dB | +0.06 dB | +0.53 dB | +0.55 dB |
+| `ewa_lanczossharp` | **+0.59 dB** | +0.04 dB | **+0.59 dB** | +0.68 dB |
+| `ewa_ginseng` | +0.55 dB | +0.05 dB | +0.55 dB | +0.61 dB |
+| `ewa_hann` | +0.47 dB | +0.08 dB | +0.48 dB | +0.36 dB |
+| `ewa_robidouxsharp` | +0.40 dB | −0.02 dB | +0.42 dB | +0.50 dB |
+| RAVU-zoom | +0.43 dB | −0.11 dB | +0.43 dB | **+1.99 dB** |
+| `ewa_lanczos4sharpest` | +0.20 dB | **+0.17 dB** | +0.19 dB | +1.14 dB |
+| `ewa_robidoux` | −0.10 dB | +0.08 dB | −0.09 dB | −0.24 dB |
+| FSRCNNX 8 AR | −0.48 dB | −0.05 dB | −0.41 dB | +0.48 dB |
+| `ewa_jinc` | −2.14 dB | −0.48 dB | −1.99 dB | −0.54 dB |
+
+The 4:4:4 picture itself, enlarged the same way, is 54.33 dB at the edges against the 4K original
+where Catmull-Rom's 4:2:0 one is 49.05: what the subsampling costs, of which the best kernels win
+back half a decibel. EWA Lanczos Sharp is ahead of the Jinc by 0.07 dB at the edges, on five
+frames of six (+0.05 to +0.12, and −0.01), more than at 1:1 and still a hundredth of what the
+subsampling costs. RAVU-zoom is below the Jinc at the edges on film and far above everything on
+drawn lines, as at 1:1; against the 4K original it loses less on the whole colour (−0.11) than
+against the 4:4:4 picture (−0.53), its constant shift of a tenth of a level counting for less
+there. Lanczos4 Sharpest keeps the most colour overall and loses at the edges, as at 1:1.
+
+The **defaults**: Upscaling is Jinc2m for a fresh installation, and Chroma upsampling EWA
+Lanczos Sharp since 3.0 (Catmull-Rom before), and settings already saved in the registry are left alone — each entry
 carries its own number, so reordering the lists moved nobody's setting.
 
 The statistics show what they cost on the step they serve, a luma prescaler on *Scaling* with
@@ -1093,7 +1208,7 @@ measured on film frames halved from 4K, against the same frame through the proce
 it is on the control's side of the choice: with it set to *Disable* the picture goes round in
 4:4:4 and keeps what it had.
 
-In MPC-HC, a 1080p film at 25 fps on a television at 25 Hz, RTX Video HDR on: with DLSS 5 NR
+In MPC-HC, a 1080p film at 25 fps on a television at 25Hz, RTX Video HDR on: with DLSS 5 NR
 and the processor enlarging, a picture is ready 26 ms after it arrives, and 36 to 39 ms with
 Super Resolution as well (the *Render ahead* line) -- of the 40 ms a frame lasts. That is the
 edge, on an RTX 4060: over stretches of a hundred pictures one run left none out and another
@@ -1254,6 +1369,37 @@ given an 8-bit picture to write in ten bits, it writes HDR10 -- PQ, BT.2020 -- w
 space it was asked for, and the SDR swap chain showed a dim, grey picture, everything under
 115 nits. The processor is then given eight bits to write, and writes what it was asked. A
 10-bit source was never affected.
+
+### What the driver is set to, and what it writes
+
+RTX Video is the driver's, and Direct3D accepts the request whatever the driver then does
+with it: Super Resolution and RTX Video HDR apply only when the NVIDIA app has them on, and
+RTX Video HDR makes the picture as bright as the app says. The app keeps these as driver
+values of the display adapter (`_User_Global_VAL_SuperResolution`, `_User_Global_VAL_TrueHDR`
+and RTX HDR's sliders beside it, `_P`, `_M`, `_C` and `_S`: peak, middle grey, contrast,
+saturation), which no public interface exposes; the renderer reads them, as FrankyRenderer
+does, and decides nothing on them. With the statistics shown and an NVIDIA card:
+
+- **NVIDIA app** says what the app has the driver do: `Super Resolution 4, RTX Video HDR on`.
+- **RTX HDR set**, while RTX Video HDR is ticked, gives the sliders:
+  `peak 750 nits, mid grey 42, contrast 120, saturation 85`.
+- **RTX HDR out**, while the driver runs it, is what it really wrote, measured on the
+  processor's output before anything of the renderer's touches it, with the GPU histogram the
+  tone mapping uses: the last picture's peak, the peak over the window, the mean, and the peak
+  the display reports to Windows -- `peak 239, over 3 s 426, mean 11 nits; display 8300 nits`
+  on the film the battery plays, paused on a dark scene. Its two dispatches run only while the
+  statistics are shown, and are in none of the steps' times.
+
+The last two numbers need not agree: Windows reports what the display's EDID or its HDR
+calibration says, 8300 nits for the television these were measured on, and the driver goes
+by the app's peak. A renderer that maps the driver's output into the display's peak changes
+the picture wherever the driver writes past it; this one passes it through untouched, and
+neither *Measured peak* nor a tone map method applies to it. Neither did, except after a
+snapshot: with a tone map method chosen, the player's *Save image* (`GetCurrentImage`) left the
+HDR10 tone mapping behind on RTX Video HDR's output with none of its parameters, and the
+picture went black until the film was opened again -- upstream's code, which rebuilds that
+shader after a snapshot for any HDR output. It is rebuilt now for an HDR source only, and
+`playback_test --aftergrab` reads the screen on the same paused picture before and after one.
 
 ---
 
@@ -1691,6 +1837,147 @@ prevents that, and the tooltip says so.
 
 ---
 
+## Dithering
+
+*Use dithering* adds, before output, a threshold from a fixed 32x32 matrix of 1 024 values -- a
+blue noise, its energy in the high frequencies -- and keeps the step below: `floor(value * Q +
+threshold) / Q`, Q 255 for an 8-bit swap chain and 1023 for a 10-bit one. It runs only where
+the picture holds more than the swap chain: an 8-bit swap chain behind deeper textures, or a
+10-bit one behind 16-bit float textures. Behind 10-bit integer textures every step writes ten
+bits and rounds, and nothing dithers. The swap chain is 10-bit for HDR output, and for SDR when
+the display reports ten bits or more and the textures are deeper than eight; it is never more
+than ten, whatever the link to the display carries (twelve bits to a television is the
+driver's affair).
+
+`dlssnr_harness --tdither` runs the compiled final passes the filter embeds, with its own matrix
+and samplers, on 1920x1080 ramps that climb twelve output steps across the width -- the worst
+case, bands 160 pixels wide -- and checks them against the same sum on the CPU: not one pixel
+differs, at 8 or at 10 bits. Errors are in output steps; banding is the error of 16x16 block
+means, where a dither's noise averages out and a step does not:
+
+| Ramp | Rounded | Dithered | A pass in 10-bit textures, no dither | A pass in half floats, dithered |
+|---|---|---|---|---|
+| SDR, 8 bits, from 0.30 | 0.267 | 0.008 | | |
+| PQ, 10 bits, from 0.25 (shadows, about 5 nits) | 0.278 | 0.043 | 0.410 | 0.080 |
+| PQ, 10 bits, from 0.70 (highlights) | 0.250 | 0.104 | 0.390 | 0.182 |
+
+"Rounded" is the half-float picture rounded to the swap chain, which is what a 10-bit target
+does without the dither. The two chains go through one pass that moves every value a little, as
+a resize or a tone curve does (`v * 0.9375 + 0.03`): ten-bit textures round at every write,
+half floats keep more and the final pass dithers. The worst block is 0.91 and 0.86 of a step
+through ten-bit textures, 0.18 and 0.40 through half floats. The dither adds no offset (under
+0.001 of a step); its price is noise, 0.40 to 0.45 of a step per pixel against 0.29 for
+rounding. In the highlights a half float carries one bit more than ten and no more, which is
+why the dither does less there.
+
+Netflix's CAMBI agrees on 8 bits -- 12.1 rounded, 0.16 dithered (`--tdither --study`, then
+`clean_refs.py --cambi --listing dither_out\cambi.txt`) -- and sees next to nothing in any 10-bit
+ramp (0.17 at most): it judges code values with an SDR model of the eye, which says nothing of
+PQ.
+
+The matrix is the same in every picture, unless **A new pattern each picture** is ticked (Detail
+tab, off by default, Direct3D 11): the pattern then starts 11 cells further across and 19 further
+down at each new picture of the film, so that every pixel meets another threshold; a picture
+drawn again (paused, or rendered for a snapshot) keeps its own pattern. The eye, which averages a
+still picture over several, sees less of the noise: averaged over eight pictures, pixel by pixel,
+0.40 of a step with the pattern held still against 0.16 with it moving (the shadows' ramp; 0.41
+against 0.15 on 8 bits, 0.45 against 0.21 in the highlights). `--tdither` runs the final pass
+that ships with the filter's first eight positions and checks each picture against the same sum
+on the CPU: not one pixel differs. Whether the moving pattern shows as a shimmer at 24 pictures
+a second is not measured, which is for the eye to judge and why it is off by default.
+
+**Since 3.0, *Bit depth: Auto* takes half floats for HDR output** -- HDR video sent in HDR, and
+RTX Video HDR -- so that an HDR picture goes the way of the table's last column rather than the
+one before it. What it costs, measured by the same bench on a film frame (`upscale_refs\4K1.png`
+reduced to 1080p) enlarged to 4K by Catmull-Rom on an RTX 4060: 0.24 ms a picture straight into
+the 10-bit back buffer, 0.47 ms through half floats and the dither, 0.23 ms more. The video
+processor's own write, in half floats rather than ten bits, is not in that figure. SDR keeps
+10-bit textures for a source above 8 bits and 8-bit otherwise.
+
+---
+
+## Following the peak
+
+A tone mapping by the measured peak (*Measured peak* on HDR output, the *Measured* method of
+the conversion to SDR) is only as good as the peak it is given: too low and the highlights above
+it are cut flat, too high and they are pressed down for nothing. The measurement keeps the
+brightest pixels but one in 10 000 of each picture, and the curve is given the mean of those
+peaks over the last three seconds (`SdrPeakWindowMs`), never under 640 nits (`SdrPeakFloorNits`);
+by default the window does not start over at a cut, which is upstream's choice (`SdrPeakSceneCuts`,
+off, "what matches madVR"; on the HDR tab since 3.0, *Start over at a scene cut*).
+libplacebo -- what FrankyRenderer and mpv use -- follows a low-pass of 20 pictures that a
+change in the mean brightness opens at once.
+
+`dlssnr_harness --ttonemap` puts the two side by side: four scenes cut together, three reference
+pictures made HDR with known peaks (1000, 4000, 300 and again 1000 nits, the brightest pixels but
+one in 10 000 at that peak) and a grain that changes every picture, 24 a second. The filter's
+measurement runs as its own shaders, `cs_hdr_hist.hlsl` and `cs_hdr_resolve.hlsl` with the
+filter's constants; libplacebo's is written again from `update_peak_buf`. Each is judged against
+the picture's own peak, through BT.2390 to a display of 750 nits, on the highlights (above 200
+nits):
+
+| After the cut | | to 4000 nits | to 1000 nits, from 300 |
+|---|---|---|---|
+| The filter as it ships | settles in | 62 pictures (2.6 s) | not in the scene's 48 |
+| | peak used, off by | 36 % | 34 % |
+| | highlights cut flat | 10.0 % | 0.2 % |
+| | highlights off by | 14.0 nits | 6.0 nits |
+| The filter, *Start over at a scene cut* | settles in | 0: its first picture | 0 |
+| | highlights off by | 0.1 nits | 0.0 nits |
+| libplacebo, its default | settles in | 0 | 0 |
+| | highlights off by | 0.6 nits | 0.1 nits |
+
+So the measurement is right and the window is slow: within a scene the filter's peak is within
+0.4 % of the picture's, and a cut takes the window's three seconds to come through, where the
+setting that was already there, `SdrPeakSceneCuts` -- now the HDR tab's *Start over at a scene
+cut* -- brings it to the scene's first picture, as libplacebo does with its hysteresis. The
+300-nit scene is left out of the comparison: the floor holds the filter's peak at 640 there, and
+below the display's 750 the curve does nothing whatever the peak.
+
+**In the filter itself.** The same four scenes, made into an HDR10 film by
+`make_hdr_scenes.py upscale_refs <out.mkv>` (HEVC 10-bit, PQ and BT.2020 in the stream, 23.976 pictures a second, the four repeated eight times: 80 s, 24 real
+cuts), played by `playback_test --file <it> --hdrtm 4 --measurepeak 1 --peakcuts 0|1 --cadence
+0|1` on a 60Hz screen, with `MPCVR_PACING_TRACE` writing every picture's own peak, the peak the
+curve was given and the window's count (`pacing_report.py <trace> --peak`). The cuts are the
+ones the cadence slips' detector found, which is a detector apart from the measurement's:
+
+| | cuts the peak followed at once | the others | window restarts on no cut |
+|---|---|---|---|
+| *Start over at a scene cut* off | 0 of 24: 60 to 64 pictures each | | 0 |
+| on | 16 of 24, from the scene's first picture | 8, 64 pictures each | 0 |
+
+The eight it misses are the cuts from the 4000-nit scene to the 300-nit one. The window starts
+over on a jump of the picture's **mean** brightness (more than 0.10 in PQ), so that a bright
+object entering a shot does not restart it; there the shots differ in their highlights and
+hardly in their mean, and the floor of 640 nits then takes the window's three seconds to come
+down to. A cut that only changes the highlights is not seen as one.
+
+The jump is followed once the next picture agrees, so that a one-frame flash cannot empty the
+window. Upstream drew the jumping picture with the window's peak meanwhile: a new scene's first
+picture got the scene before's, and its second its own, a step one picture after the cut. The
+cadence slips' detector, run beside it, called that step a second cut 16 times in 16 (40 cuts
+where there are 24). That picture is now drawn with its own peak, the window left as it was
+until the next one says whether it was a cut: 24 cuts again, and the peak the curve was given
+changed on those 16 pictures and no other. A one-frame flash is drawn with its own peak too and
+leaves the window alone; a slow fade has no jump to take. Direct3D 9's own peak (`hdr_peak_state.hlsl`)
+does the same.
+
+The two options leave each other alone otherwise. With *Start over* on, the peak the curve was
+given is the same on all 1 918 pictures with *Hide the 60Hz hiccup* on and off, and the
+hiccups are the same with *Start over* on and off: 10 on scene changes, none forced, on the same
+pictures. They find cuts apart on purpose: the measurement's test costs nothing (the mean of the
+histogram it makes anyway, compared on the GPU in the same picture), and the cadence detector
+looks at the finished picture, after the tone mapping, and answers once the GPU is done with it,
+too late for the curve of the picture it is asked about.
+
+The rest of what libplacebo adds to its tone mapping was looked at and not taken: a black
+cutoff for the mean brightness (the filter's curves read the peak, never the mean), a knee that
+follows the mean, contrast recovery and a lower exposure on scenes brighter than the display
+(its "dynamic target"). None has a right answer to be measured against, which is what this
+filter asks before it changes a picture.
+
+---
+
 ## Render ahead
 
 The renderer wakes up 8 ms before a picture's time and only then processes it, so whatever
@@ -1698,7 +1985,7 @@ the DLSS passes take beyond those 8 ms used to reach the screen late. The render
 offset* on an RTX 4060: −7 ms without DLSS, +11 to +17 ms with DLSS 5 NR, +11 to +19 ms with
 DLSS 5 NR and DLSS SR — and DLSS SR's GPU time comes on top, since the GPU runs it after
 Present has returned. The delay also varied by several ms from picture to picture, enough to
-move some pictures to the next refresh of a 60 Hz screen.
+move some pictures to the next refresh of a 60Hz screen.
 
 **Render ahead: a refresh chosen for each picture** (Presentation tab, on by default; *Render
 ahead to keep audio sync* before 2.5) measures each picture from
@@ -1720,7 +2007,7 @@ only an Apply while a film played did, and the next file had render ahead on aga
 settings said.
 
 Measured in a DirectShow graph with the filter itself (`playback_test.exe`): an 800×450 film in
-a 1280×720 window on an RTX 3050 and a 60 Hz screen, with DLSS 5 NR and DLSS SR (NR 23 ms,
+a 1280×720 window on an RTX 3050 and a 60Hz screen, with DLSS 5 NR and DLSS SR (NR 23 ms,
 stabilizer 1.6 ms, SR 3.2 ms), 20 s per run. Sync offset, mean (5th…95th percentile), and
 skipped pictures:
 
@@ -1766,15 +2053,15 @@ are still waiting for one.
 
 It matters on a screen that refreshes exactly as often as the film has pictures: 24 fps at 24
 Hz, 25 at 25. DXGI lets three pictures wait unless told otherwise and `Present` returns at once
-while there is room. At 60 Hz there are two and a half refreshes for every picture and the
+while there is room. At 60Hz there are two and a half refreshes for every picture and the
 room is never used. With one refresh a picture, the first pictures of a film arrive in a burst
 and fill it, and nothing ever empties it again -- a pause and play does, which is why that
-cured it. Measured with a 30 fps film on a screen at 30 Hz (`playback_test --hz 30 --fps 30
+cured it. Measured with a 30 fps film on a screen at 30Hz (`playback_test --hz 30 --fps 30
 --jolt`): the queue sat at 3 and the picture reached the screen **72 to 92 ms** after its
 time, with the Sync offset reading -7 throughout.
 
 The renderer now asks DXGI for one picture waiting and no more
-(`IDXGIDevice1::SetMaximumFrameLatency(1)`). Same test: queue 1, on screen +43 ms. At 60 Hz
+(`IDXGIDevice1::SetMaximumFrameLatency(1)`). Same test: queue 1, on screen +43 ms. At 60Hz
 nothing moves -- sync offset -7.0 to -7.1 ms across the battery, on screen within 6 ms of the
 picture's time, nothing skipped.
 
@@ -1788,7 +2075,7 @@ its time, the same after 20 s as at the start, with the Sync offset reading +8 t
 For a while the renderer then left one picture out when that had lasted -- eight pictures
 running waiting more than a refresh -- and counted it in the statistics as *caught up*. It is
 gone since 2.5. It only ever saw pictures render ahead did not schedule, and there it did harm:
-measured in MPC-HC on a film at 23.976 Hz with render ahead off, it left a picture out every
+measured in MPC-HC on a film at 23.976Hz with render ahead off, it left a picture out every
 half second, 245 in 135 s, each a jump followed by a picture shown twice; upstream's own filter
 showed 1 to 4 pictures twice in the same two minutes. Without it the same run shows one. A film
 that starts late with render ahead off now stays late, as it does upstream; render ahead keeps
@@ -1805,7 +2092,7 @@ to do, as on a film shown at its own size.
 ### A refresh chosen for every picture
 
 Everything above times the call to `Present` and leaves the rest to the queue. Measured where
-it matters -- MPC-HC itself, fullscreen on a television at 25 Hz, a 25 fps film through the
+it matters -- MPC-HC itself, fullscreen on a television at 25Hz, a 25 fps film through the
 video processor with RTX Video HDR, with a line written for every picture (see *Diagnostic
 tools*, the pacing trace) -- that was not enough, three times over.
 
@@ -1826,7 +2113,7 @@ picture out, read the same again, and went on. That is the stutter after a chang
 What decides is where in a refresh `Present` is called, which the same trace measured by
 calling it a chosen time after a blank:
 
-| `Present` called after a blank | 25 Hz: on the screen after | |
+| `Present` called after a blank | 25Hz: on the screen after | |
 |---|---|---|
 | 0 ms | 80.1 ms | the second blank from there |
 | 6, 12, 18, 24, 30 ms | 73.9, 67.9, 61.8, 55.8, 49.9 ms | the same one |
@@ -1834,7 +2121,7 @@ calling it a chosen time after a blank:
 | 38 ms | 81.8 ms | every picture a refresh later |
 
 Anywhere from a blank until some milliseconds before the next, the picture is shown on the
-blank after that one; in the last few it slips, and not every time. At 60 Hz the same: 13 ms
+blank after that one; in the last few it slips, and not every time. At 60Hz the same: 13 ms
 after a blank is in time, 15 ms is a refresh late. And the start of a refresh is no safer than
 its end: in the bench's window a `Present` called 3 ms after a blank was in time or not from
 one picture to the next, and every second or third then waited a whole refresh.
@@ -1848,17 +2135,17 @@ So with **Render ahead** on, the renderer now gives every picture a refresh in a
 - `Present` is called a third of a refresh after a blank, clear of both edges, as many
   refreshes before the picture's own as the queue is deep. How deep is measured: DXGI says
   on which refresh each `Present` ended up.
-- The sample is asked for early enough for all that: 80 to 100 ms before its time at 25 Hz,
+- The sample is asked for early enough for all that: 80 to 100 ms before its time at 25Hz,
   depending on where the refreshes fall, which is what *Render ahead* in the statistics now
   reads for every film (less the 8 ms every sample is already given).
 - A film with a whole number of refreshes per frame keeps that step from picture to picture,
   and is only moved -- a picture given a refresh more, or left out -- when the two clocks have
   drifted three quarters of a refresh apart. The nearest refresh alone would flicker between
   two whenever a picture's time fell half way.
-- A film without one -- 23.976 fps at 60 Hz, 2.5025 refreshes a picture -- takes the nearest
+- A film without one -- 23.976 fps at 60Hz, 2.5025 refreshes a picture -- takes the nearest
   refresh, which makes the 3:2 cadence, and the time it goes by is not the picture's stamp but
   the stamp smoothed: Matroska keeps stamps to the millisecond, 41, 42, 42, 41... ms, and each
-  time the cadence had to change step, every 8.3 s at 60.000 Hz, the rounding made the nearest
+  time the cadence had to change step, every 8.3 s at 60.000Hz, the rounding made the nearest
   refresh flip five or six times in half a second. See *What the screen shows* below.
 - A redraw the player asks for while the film plays -- its message over the picture after a
   change of track -- is no longer a `Present` of its own: it landed in the same refresh as a
@@ -1891,8 +2178,8 @@ What it cannot do:
 - **The two clocks drift.** When they do, a picture is repeated or left out once per refresh
   of drift, and nothing a renderer does can spare it: the sound would have to be resampled.
   How much depends on the display mode. On the machine this was written on, a 25 fps film at
-  25 Hz hardly moved: seven minutes with the offset at +11.5 ms, to a tenth. A 23.976 fps
-  film in 4K HDR at 23.976 Hz, thirty minutes: 43 086 pictures in a row each on its own
+  25Hz hardly moved: seven minutes with the offset at +11.5 ms, to a tenth. A 23.976 fps
+  film in 4K HDR at 23.976Hz, thirty minutes: 43 086 pictures in a row each on its own
   refresh, none repeated and none left out, and the offset going from −14 to +4 ms, 0.65 ms
   a minute. That is one picture left out every 64 minutes, the first when the offset has
   reached three quarters of a refresh.
@@ -1902,7 +2189,7 @@ What it cannot do:
   later, or leaves one out when that would put them too far from their time, and is back in
   step within two pictures. It used to stay a refresh late for good. The trace now says when
   the GPU was done with each picture and how DXGI put it on the screen: on a film at
-  23.976 Hz, three such pictures in 305 s, two with the statistics hidden, every one finished
+  23.976Hz, three such pictures in 305 s, two with the statistics hidden, every one finished
   by the GPU 3.5 to 7.6 ms before its `Present` and every picture of the film composed by the
   desktop. Upstream's filter shows it as often (see *What the screen shows*). The compositor
   only carries it: with RTX Video Super Resolution or DLSS SR on an NVIDIA card, Windows'
@@ -1913,7 +2200,7 @@ What it cannot do:
   been drawn by then, and the next one is no sooner for it. With DLSS 5 NR on a 25 fps film
   that turned the rule against itself, twice. At 52 ms a picture, every one came behind its
   time and every one was left out: 744 of 767, a screen that moved once in two seconds. At
-  33 ms, on a 25 Hz screen, one picture a refresh late was followed by one left out, whose
+  33 ms, on a 25Hz screen, one picture a refresh late was followed by one left out, whose
   own drawing made the next a refresh late again, and the film ran at 12.5 pictures a second
   for as long as it played, 463 left out of 944. So the schedule asks first whether the next
   picture, drawn after this one, would still be in time for its refresh. When it would not,
@@ -1938,10 +2225,10 @@ it. In MPC-HC, a 1080p film at 25 fps with DLSS 5 NR and no RTX Video HDR, on an
 
 | | two buffers | three |
 |---|---|---|
-| fullscreen at 25 Hz: DLSS 5 NR waits for its input / a picture is drawn in | 21.9 ms / 39.2 ms | 1.6 ms / 18.7 ms |
-| exclusive fullscreen at 25 Hz | 22.5 ms / 39.2 ms | 1.6 ms / 18.7 ms |
-| in a window, the screen at 60 Hz | 11.9 ms / 28.6 ms | 1.6 ms / 20.2 ms |
-| with Super Resolution after the network, 25 Hz: pictures left out, repeated | 47 and 44 of 517 | 2 and 0 of 521 |
+| fullscreen at 25Hz: DLSS 5 NR waits for its input / a picture is drawn in | 21.9 ms / 39.2 ms | 1.6 ms / 18.7 ms |
+| exclusive fullscreen at 25Hz | 22.5 ms / 39.2 ms | 1.6 ms / 18.7 ms |
+| in a window, the screen at 60Hz | 11.9 ms / 28.6 ms | 1.6 ms / 20.2 ms |
+| with Super Resolution after the network, 25Hz: pictures left out, repeated | 47 and 44 of 517 | 2 and 0 of 521 |
 | no DLSS, FSRCNNX 16 AR by the shaders: a picture is ready in, counted late | 39.2 ms, 305 times | 17.7 ms, 4 times |
 
 Six buffers measure as three do, and with nothing heavy in the chain two and three play the
@@ -1949,6 +2236,96 @@ same: 457 pictures presented of a film's first 18 seconds either way, 4 left out
 starts. So an SDR picture gets three, and an HDR one keeps upstream's six.
 `MPCVR_SWAPCHAIN_BUFFERS=2` in the player's environment gives the two back, to measure it
 again.
+
+**A swap chain that starts skipping flips.** A 4K HDR10 film at 23.976 fps (film H), MPC-HC
+fullscreen on the television at 23.976Hz, the video processor's chain with HDR output, the
+picture on a plane of its own, an RTX 4060 left at its low clocks by the driver (29 ms of GPU a
+picture). After **30 to 45 minutes** of playing -- 37, 30, 38, 35, 39 and 45, in each of the
+six sessions that went on that long -- one picture every **1.024 s** reached the screen a
+refresh after the one it was presented for, and the schedule left the next out to catch up: two
+hitches a second, a spike a second on the graph, for as long as the film went on, 1110 of each
+in the 19 minutes measured. A 1920x800 SDR film in AV1 at 23.976 fps, its sound decoded rather
+than passed through, did the same after 55 minutes; a 25 fps film watched for close to two
+hours never did. The renderer had done its part: the GPU done with that picture 33 ms and
+`Present` called 27 ms before its refresh, the refreshes themselves on time to within a
+millisecond. The television, the film's position and the two clocks had nothing to do with it
+either: the same passage played from a fresh start was clean.
+
+What it did and did not answer to, every time while it went on:
+
+| | pictures shown a refresh late |
+|---|---|
+| as it was, 177 s | 172 |
+| a refresh more of queue: `Present` 69 ms before the refresh instead of 27 | 290 in 297 s |
+| a pause and play, then a seek | 86 in 88 s, then 86 in 88 s |
+| out of fullscreen and back | 0 in 96 s |
+| the swap chain resized to its own size (`ResizeBuffers`) | **0 in 88 s**, 6 pictures lost doing it |
+| a fresh start of the player | none |
+
+The period says what it is. It is the beat of the screen's 23.976Hz with **23Hz** exactly,
+1 / (f - 23) = 1.02450 s for the rate the refreshes measure, and the period fitted through each
+stretch came out between 1.02437 and 1.02454 s in four sessions: the flips were let through 23
+times a second, as if something on the way went by the mode's whole number of hertz instead of
+the rate itself. A 25 fps film puts the screen on a whole number, which has nothing to lose that
+way. `Present` itself returned in 0.07 ms throughout, and no thread on the machine woke 23 times
+a second: rather than something running, it is a time counted wrong further down, in Windows'
+graphics kernel, as its own events show (below). With the GPU's hardware-accelerated
+scheduling (HAGS) turned off, the same film played 90 minutes in one session without it, against
+every session that lasted long enough with HAGS on; it cost more of the other kind of hitch, a
+stall that puts three pictures in a row a refresh late, 6.0 an hour against 3.3 to 4.1.
+
+So the renderer now watches for that beat. It takes the pictures that reached the screen late
+although the GPU had finished them before their `Present`, counts the late ones on refreshes up
+to three apart as one group -- a stall puts several in a row late, the held-back flips one and
+the picture after it -- and four groups in a row, each starting the beat's spacing after the one
+before (24.56 refreshes at 23.976Hz, within 10 %), have it resize the swap chain to its own size
+once, about three seconds in. Should it come back within a minute, that is not what it needed,
+and it is not tried again on that swap chain. The statistics' *Swap chain* line says
+`renewed N time(s) for skipped flips`, and the pacing trace has a note at each. The first
+version of the rule, five ready pictures late in eight seconds, renewed the swap chain once for
+nothing in the 90 minutes without HAGS, on two stalls 0.3 s apart. This one, replayed on the 7.9
+hours of traces taken, acts at the start of each of the seven times it happened and nowhere
+else, and would at three groups in a row as at five. Played with the first version: the film above
+renewed at 45 minutes, 5 pictures left out doing it and none in the 9 minutes after; the AV1
+film at 55 minutes, then none in the 10 minutes after. With this one, in MPC-HC itself: held back
+after 36 minutes, renewed 3 s later at the fourth group, 7 pictures left out in that minute and
+none in the 38 minutes that followed. A mode of a whole number of hertz has no beat, and the
+rule is off there; 29.97 or 59.94Hz would beat with their own, which is not measured.
+*Windows 23Hz stutter: rebuild the swap chain* (Presentation tab, *Frame Pacing Workarounds*, on by
+default) turns the renewal off when unticked: the stutter then stays as Windows leaves it, and
+the trace notes each time the swap chain would have been rebuilt.
+
+**What holds them back, from the graphics kernel's own events.** An event trace of
+Microsoft-Windows-DxgKrnl, recorded with WPR while the film played in MPC-HC and the swap chain
+left as it was (`MPCVR_SWAPCHAIN_RENEW=0`), shows where the 23Hz comes from. The kernel smooths
+the time between VSyncs over every one since the film went fullscreen (`VSyncSmoothenedPeriod`:
+417,092 ticks of the 10 MHz counter, 41.709 ms, 41,573 samples after 29 minutes), and keeps
+beside it the display mode's own period, which it holds as 434,782 ticks: 1/23 s, the mode's
+whole number of hertz, where the mode is 23.976Hz (41.7084 ms by Windows' display
+configuration). With hardware-accelerated scheduling each flip of the video's plane is given an
+earliest ideal time, the one before's plus the smoothed period (`MMIOFlipMultiPlaneOverlay3`,
+`ThisFlipEarliestIdealTimeQpc`, its target half a period earlier), and every one of the 2,488
+flips of the 110 s examined around the start reached the screen on the first VSync after that
+time, before the stuck flips as during them: the display driver does exactly as it is told.
+
+What changes is the smoothing. The compositor asks, every frame, for the smoothed time of one
+frame of the film's first seconds (the same `DpcFrameNumber`, 7 s after the renderer's first
+`Present`), which the kernel works out back over tens of thousands of frames, so that a wobble of
+a few tenths of a microsecond in the period moves it by milliseconds: 1.3 ms off after 26 minutes,
+then 10, 16 and 21.6 ms in the last two seconds before the flips were held back. Past half a
+period the kernel resets its smoothing (`VSyncSmoothenedReset`), which leaves it with the mode's
+period of 1/23 s; against that one the old frame is off by far more, so it resets again, twice a
+frame, 47 times a second for as long as the film went on, never gathering more than one sample.
+From the first reset on, the flips' earliest ideal times stepped 43.478 ms apart instead of
+41.709: one refresh lost every 24.56, the beat measured from the outside.
+
+That accounts for all of it: half an hour or more before it begins, depending on how the period
+wobbles and how old that first frame is; a mode of a whole number of hertz safe from it, 25Hz
+falling back on 1/25 s, which is right; nothing without HAGS, whose hardware flip queue is what
+goes by those times; and a renewed swap chain, or a fullscreen left and taken again, putting an
+end to it -- presumably as the compositor stops asking for that frame, which the trace cannot
+show, the swap chain having been left alone. The fault is Windows', not the renderer's nor the
+display driver's; the renderer renews the swap chain because nothing else it can do ends it.
 
 With *Render ahead* off nothing of this is used and the renderer times its `Present` as
 upstream does, by *Wait for VBlank before Present* and *Adjust the frame presentation time*,
@@ -1965,7 +2342,7 @@ each picture of the film stayed. A film, 4K HDR output on the Panasonic televisi
 video processor resizing with Super Resolution and RTX Video HDR, in MPC-HC, two minutes of film
 for each line, on an RTX 4060:
 
-| 60.000 Hz, 23.976 fps | breaks in the 3:2 cadence | a picture shown 4 refreshes, the next 1 | on the screen against its time |
+| 60.000Hz, 23.976 fps | breaks in the 3:2 cadence | a picture shown 4 refreshes, the next 1 | on the screen against its time |
 |---|---|---|---|
 | render ahead, before 2.5 | 78 to 90, five or six in half a second every 8.3 s | 0 to 2 | −8 to +8 ms |
 | **render ahead, 2.5** | **18**, one every 8.3 s | 1 | −8 to +8 ms |
@@ -1973,23 +2350,272 @@ for each line, on an RTX 4060:
 | upstream 0.10.10, VBlank off | 109 to 115 | 0 to 1 | not measured |
 | upstream 0.10.10, VBlank on | 105 to 126 | 3 to 11 | not measured |
 
-| 23.976 Hz, 23.976 fps | pictures shown twice | on the screen against its time |
+| 23.976Hz, 23.976 fps | pictures shown twice | on the screen against its time |
 |---|---|---|
 | **render ahead** | 2 or 3 (each followed by one left out to keep the step) | **+6 to +12 ms** |
 | render ahead off, before 2.5 (the catch-up) | 32 to 241 | +51 to +96 ms |
 | render ahead off, 2.5, Adjust on | 1 | +92 to +94 ms |
 | upstream 0.10.10, any combination | 1 to 4 | not measured |
 
-A screen at 60.000 Hz needs one break in the 3:2 cadence every 8.3 s for a 23.976 fps film, and
-no renderer can do with fewer; at 59.94 Hz it needs none, and at the film's own rate the cadence
+A screen at 60.000Hz needs one break in the 3:2 cadence every 8.3 s for a 23.976 fps film, and
+no renderer can do with fewer; at 59.94Hz it needs none, and at the film's own rate the cadence
 is one refresh a picture. A player that switches the screen to the film's rate (MPC-HC's *Auto change fullscreen monitor
-mode*, 23.976 fps on 23 Hz) gets that.
+mode*, 23.976 fps on 23Hz) gets that.
 
-The duplication itself costs the compositor work: the same film at 23.976 Hz showed a picture
+The duplication itself costs the compositor work: the same film at 23.976Hz showed a picture
 twice 2 or 3 times in two minutes watched, 3 times in five minutes unwatched. Those were measured
 with Windows' hardware-accelerated GPU scheduling off; they come from the GPU being held up by a
 service of NVIDIA's, and with the scheduling on there were none in thirteen minutes (see *Known
 limitations*).
+
+### Cadence slips: on a scene cut, or a picture made between two
+
+A 23.976 fps film on a screen at 60.000Hz owes the screen a refresh it cannot share out: 2.5025
+refreshes a picture where the 3:2 cadence gives 2.5. Every 200 pictures, 8.34 s, the 3 and the 2
+change places, and two pictures in a row are held three refreshes, a 3,3. A film at 29.97 or 59.94
+owes one every 16.7 s, a picture held a refresh more; a film at the screen's own rate owes one in a
+long while, the two clocks drifting some parts in a million apart (one picture in 64 minutes,
+measured above). No renderer can do with fewer -- they are the arithmetic of the two rates -- but
+where one goes is free within a little of the pictures' times, and where the picture changes
+anyway, on a scene cut, a picture held a refresh longer is not seen.
+
+Measured first as it was, in MPC-HC (a copy of it, the screen held at 60.000Hz), a 23.976 fps film,
+4K HDR output through the video processor with RTX Video HDR, the pacing trace and `cadence_watch`
+reading the screen: **17 slips in 143 s, one every 8.4 s**, each a 3,3, and nothing else repeated or
+left out; the screen showed 14 in the 123 s it was watched.
+
+Two boxes of the Presentation tab's *Frame Pacing Workarounds* say where they go:
+
+- Neither, the default: where the nearest refresh puts them, as before (*where they fall* below).
+- **Hide the 60Hz hiccup on scene changes** (*on a scene cut*): the cadence is kept past the
+  point where the nearest refresh would break it, and broken on the first cut found from a
+  quarter of a refresh before that point to a quarter after (a 3:2 cadence), or from half a
+  refresh to where the step was given up before -- three
+  quarters of a refresh, or 17 ms if that is more (a whole step) -- the last picture of the old shot
+  holding the screen a refresh longer. In a 3:2 cadence only a 2 is made a 3, never a 3 a 4: a cut
+  that opens on a 3 gives the slip to the picture after it, the new shot's first holding a refresh
+  longer. No cut by the end of that window, and the slip is taken where it is. A picture is then
+  within 12.5 ms of its time in a 3:2 cadence, against 8.3 ms where they fall, and within 17 ms at
+  29.97 and 59.94; at a film's own rate the step was already kept to three quarters of a refresh,
+  and the repeat or the picture left out that the drift owes waits for a cut within it.
+- and **Otherwise, show an interpolated frame** (*on a cut, else made*): the same, and a slip
+  that no cut came in time for shows a picture made between the two, by EchoFG (below), on the
+  refresh it adds. A picture left out at a film's own rate stays one.
+
+**Ticked, they run only where slips come often enough to be seen.** Watching for a cut means
+copying every picture out and measuring it, 0.2 ms a picture at 1280x720 on the RTX 4060, for a
+slip that may be hours away. Since 3.0 the schedule watches a cadence only where it owes a slip
+at least every 2 500 pictures (`kSlipsOften`): 23.976, 29.97 and 59.94 fps on a 60Hz screen, the
+same on 120 or 144Hz (23.976 fps is 5.005 refreshes a picture at 120Hz, a slip every 8.3 s), a
+23.976 fps film on a 24Hz mode and 24 fps on 23.976Hz (one every 42 s -- a player that sets the
+screen to 24Hz for a 23.976 film does this). 24 fps on 60Hz (3:2 exactly), 23.976 on 59.94Hz, 25
+on 50Hz, 24 on 120Hz and any film at the screen's own rate are not watched: nothing is copied or
+measured, the statistics say `Hiccups : none owed at this rate`, and the slip that the drift of
+the two clocks owes once an hour or so goes where it falls. `dlssnr_harness --tcadence` puts
+thirteen of these through the schedule; `playback_test --file` at 60Hz showed the Cadence step at
+23.976, 29.97 and 59.94 fps and not at 24 or 25.
+
+The same two and a half minutes of film, each line a start of the player, the slips counted in
+the pacing trace (`pacing_report.py` counts the 3,3s and says how each was taken) and the screen
+read by `cadence_watch` for two of those minutes:
+
+| Cadence slips | slips taken on a cut | forced | covered by a made picture | the screen: 3,3s seen, and on a cut | a picture against its time |
+|---|---|---|---|---|---|
+| where they fall | -- | -- | -- | 14, none placed | −9.3 to +9.6 ms |
+| on a scene cut | 18 | 2 | -- | 14, all 14 | −13.1 to +12.5 ms |
+| on a cut, else made | 17 | 2 | 2 | 14, 13 on a cut; the 14th forced, its made picture on a nearly still stretch, where it looks the same as the one before | −12.5 to +13.5 ms |
+| else made, every cut ignored (`MPCVR_CADENCE_NOCUT=1`) | 0 | 20 | 19 | 1: 14 of the 15 made pictures watched showed as a picture of their own between the two, the 15th on a still stretch | −13.1 to +5.6 ms |
+
+A first version waited for a cut until a picture was 17 ms early, as long as in a whole step, and
+was worse for it: a slip forced there had taken only half of the refresh it was owed, so the next
+cut took another at once, and three came in four seconds where one every 8.3 is due. A slip
+waiting in a 3:2 cadence also had no use for a cut on a 3, which is every other cut.
+
+24, 25 and 30 fps on 60Hz are left as they are, and so is any rate the screen is not a little
+faster than. It needs render ahead, which schedules every picture; the line *Frame sync* in the
+statistics says which is in force, and *Hiccups* counts the slips taken on a cut, the forced ones
+and the made pictures.
+
+**The cuts** are found by the detector DLSS Super Resolution drops its history on
+(`cs_dlss_scene_cut.hlsl`, *DLSS SR at a cut*), with the thresholds it was chosen with, run here on
+any card: on a frame of its own made from the picture as drawn, before anything goes over it
+(`cs_scene_cut_luma.hlsl`, the same box and size as the flow frames it was tuned on, an HDR picture
+seen in its SDR view), and without NVIDIA Optical Flow's global motion, which its ratio to the
+pictures before and its histogram make up for. Its answer is the GPU's, read when the picture's turn
+to be presented comes: not done by then is no cut. A false cut only moves a slip. Over the same two
+and a half minutes of film beside ffmpeg's scene score (`dlssnr_harness --tcadencecut`): 60 cuts
+called, every picture ffmpeg scores past 0.3 among them, and 12 called where ffmpeg scores under
+0.1, all in eight seconds of flashes where the picture changes as much as at a cut.
+
+**The made picture** is EchoStorm's frame synthesis, EchoFG, from its motion estimate: the picture
+between the last one and this one at the moment of the refresh the slip adds, with the subtitles,
+the statistics and the player's own bitmap drawn over it as over any picture. Its Direct3D 11 host
+(`Source/FrameGen/echo/EchoSynth11.cpp`) makes the very picture EchoStorm's own Direct3D 12 code
+makes, to the byte, at 1080p and at 4K (`dlssnr_harness --tcadencemade`, beside EchoStorm's code):
+on a pan of a 4K film frame, 52.7 dB from the picture truly there at 1080p and 51.9 at 4K, where a
+plain blend of the two is 34.2 and 32.9. EchoStorm's marks, which keep a channel's logo from being
+dragged along by learning it over many pairs, are left out: a slip makes one picture every few
+seconds. The shaders bind fourteen views, which takes Direct3D feature level 11_1; without it, or
+when the picture is not ready for its refresh, the slip is a plain one.
+
+It has to be ready a refresh before the drawn picture's own, and the drawn picture cannot come
+before the one ahead of it has been presented: at 23.976 fps on 60Hz that leaves about 38 ms for
+the GPU to draw the picture and EchoFG to make the one before it. So the renderer waits for the GPU
+to be done with the drawn picture, and starts EchoFG only if its time -- the median of the last five
+times it ran, timed on the GPU, the first of them once alone as playback starts -- still fits
+before the refresh, by the schedule's guard. A made picture the GPU has not finished by then is not
+shown: the drawn one goes back into the back buffer and the slip is a plain one.
+
+The first version did neither, and on a 4K HDR film drawn by the shaders (3840x1600, HEVC with Dolby
+Vision) it made things worse: its made pictures were not finished in time, reached the screen a
+refresh late, and the screen read 3,3,1,1 where a plain slip is 3,3, thirteen times in two minutes.
+There EchoFG took 8 ms timed alone as the film started and 20 ms while it played, beside 17.5 ms for
+each drawn picture; a 1080p film enlarged by RTX Video Super Resolution to the same 3840x1600, the
+GPU busier and quicker for it, had EchoFG at 7.4 to 11.7 ms while it played. Measured again in MPC-HC,
+every cut ignored:
+
+| film | slips forced | covered by a made picture | the screen |
+|---|---|---|---|
+| 1080p AV1, RTX Video Super Resolution to 4K | 18 | 18, each done before its `Present` | 15 made pictures watched, each a picture of its own; no 3,3 |
+| 4K HEVC HDR, the shaders | 18 | 0: no room for EchoFG | 15 plain 3,3s, no 3,3,1,1 |
+
+and the 4K film with its cuts: 14 slips on a cut and 4 forced, plain. Render ahead asks for every
+sample a refresh and EchoFG's time earlier while a slip waits (80 ms ahead of its time instead of 29
+on the 1080p film). `MPCVR_CADENCE_DUMP=<folder>` writes the first six made pictures there, each with
+the two it was made between, to look at.
+
+**Why EchoFG took 8 ms timed alone and 20 to 52 ms in the player** is the GPU's clock, not the
+port. A card playing a film is left by its driver in its video states: through the 4K film drawn by
+the shaders, nvidia-smi read every half second had the RTX 4060 at P3 and P5, 450 to 570 MHz of its
+2865, 34 to 38 % busy; the 1080p film enlarged by RTX Video Super Resolution keeps it at P0, 1.6 to
+2.8 GHz. Every GPU time is five or six times what it is at full clock then, and the clock is the
+driver's to choose from one start of the player to the next. At full clock the Direct3D 11 port takes
+1.2 to 1.4 times as long as EchoStorm's own Direct3D 12 code run in turn with it on the same pair
+(`dlssnr_harness --techoperf`: 7.96 ms against 6.07 at 3840x2160 HDR, 6.05 against 4.44 at
+3840x1600, 6.24 against 5.28 at 3840x2160 SDR), every pass alike: the two put the same barrier after
+every pass, and fxc's /O3 changes nothing. Four changes followed:
+
+- A picture more than 2560 wide is synthesised in cells of 4 pixels, which EchoStorm offers (its
+  motion is analysed at half size already). It was kept for the picture, not for the time: on
+  fourteen sets of three pictures in a row at 3840x1600, eight from the 4K film and six from the
+  1080p film enlarged, the middle one made from the other two and held against the one truly
+  there (`--techoperf --techotriplet`, the GPU at its full clock):
+
+  | at 3840x1600 | mean PSNR | against cells of 2 | EchoFG |
+  |---|---|---|---|
+  | cells of 2, EchoStorm's default | 37.06 dB | -- | 4.8 ms |
+  | cells of 1, EchoStorm's quality reference | 37.02 dB | 5 better, 6 worse, down to −0.34 | 11.2 ms |
+  | **cells of 4** | **37.20 dB** | 12 better, 1 worse (−0.13) | 4.0 ms |
+  | the motion at the full size, cells of 2 | 37.11 dB | 8 better, 4 worse | 7.0 ms |
+  | the motion at the full size, cells of 4 | 37.19 dB | 11 better, 1 worse (−0.02) | 5.6 ms |
+
+  At 1920x800 cells of 4 came out the same as cells of 2 (+0.04 dB on the mean, 2 of 14 worse),
+  and smaller pictures keep EchoStorm's cells of 2. The motion at a quarter of the size lost
+  0.3 dB on the tracking shot and 7 dB on a pan: not taken. (Three pictures in a row by ffmpeg
+  need `-fps_mode passthrough`: without it the millisecond stamps of a Matroska film had ffmpeg
+  repeat one picture in eight of fourteen sets, a middle "picture" the same as the first.)
+- The picture before needs only its pyramid (`CEchoFlow::Prime`): its vectors from nothing were
+  zeros at the full size that nothing read. 0.2 ms, the same vectors to the byte.
+- EchoFG's time is brought to the GPU's clock of the moment: the copy and the detector every
+  picture has are timed while made pictures may be wanted, and EchoFG's times are kept as a
+  multiple of them. Timed once at one clock and trusted at another, EchoFG was started where it
+  could not be ready, came out late and held up the picture after it on the GPU.
+- In a 3:2 cadence a made picture that a 2 leaves too little time for goes on a 3 instead, a
+  picture sooner: from the Present of the 3 to the refresh it is for there are four refreshes,
+  56 ms at 60Hz, where a 2 leaves three, 39 ms. A 3 made a 4 takes a whole refresh where a 3,3
+  takes half, so these slips come every 16.7 s at 23.976 fps, and the pictures between are within
+  12.5 ms of their time either way. A plain slip there would be a 4, so it is done only where the
+  made picture fits on a 3 and not on a 2; where it fits on neither, the slip is a 2 made a 3.
+
+In a window the desktop composes the picture a refresh before the screen shows it, and the made
+picture has to be done by then; it was allowed a refresh more, as full screen is. Measured in
+MPC-HC after these changes, the film at 60Hz:
+
+| film | GPU | slips forced | covered by a made picture | the screen |
+|---|---|---|---|---|
+| 4K HEVC HDR, the shaders, every cut ignored, 2 min watched | P3, 495 MHz | 10 | 7 | 7 made pictures, each a picture of its own; 1 plain 3,3 |
+| the same, its cuts heeded, a minute of fade and tracking shot | P3, 510 MHz | 3 | 3 | 3 made pictures, 2 slips on a cut, no 3,3 |
+| 1080p AV1 enlarged by RTX Video Super Resolution, in a 3400x1900 window, every cut ignored | P0, 1.9 GHz | 17 | 17 | 15 made pictures watched, no 3,3 |
+
+NVIDIA's *Prefer maximum performance* (Manage 3D settings, Power management mode) keeps the card at
+P0 while a film plays, where every step of the chain takes a fifth of the time; that is a setting of
+the computer, left to its owner. Set for MPC-HC alone, under Program Settings, it changed nothing on
+the machine measured; set in Global Settings, it held the card at 2505 MHz through every film. Then,
+on the same films at 60Hz:
+
+| film | slips forced | covered by a made picture | the screen |
+|---|---|---|---|
+| 4K HEVC HDR, the shaders, a minute of fade and tracking shot, its cuts heeded | 4 | 4, each on a 2 | 4 made pictures, 3 slips on a cut, no 3,3 |
+| the same film, every cut ignored, 2 min | 16 | 16 | made pictures every 8.3 s; once, a second of 3,3s and 2,2s where DXGI's refresh count lost five refreshes (below, since mended) |
+| 1080p AV1 enlarged by RTX Video Super Resolution, every cut ignored | 18 | 18 | 14 made pictures seen as pictures of their own, the 15th on a nearly still stretch |
+| the same in a 3400x1900 window, its cuts heeded | 1 | 1 | 17 slips on a cut, the made picture seen |
+
+EchoFG took 5.7 ms there on the 4K film, 5.3 on the 1080p film enlarged to 3840x1600 and 2.2 in the
+window; no slip went on a 3.
+
+**DXGI's refresh count going astray.** The second of 3,3s and 2,2s came 6.6 s after a made picture and
+not on one. The frame statistics DXGI gives with each `Present` pair a refresh count with that
+refresh's time; there, five times in one second, the count went on by two where three refreshes had
+gone by (49.9 to 50.0 ms between its times), and kept those five refreshes short until the end of the
+run, its times exact all along: the screen had gone on refreshing every 16.667 ms, and the count had
+missed five. The schedule took a count that disagrees with its time for another count altogether,
+a new swap chain or another display mode, and started again: five times in that second it forgot
+its cadence, the depth of the queue it had learnt and the pictures it was waiting to hear of, and
+the screen showed it.
+
+**And its times going astray, in a window.** A first answer believed the time over the count, and
+the statistics' graph stayed irregular in a window on the user's screen, full screen being right.
+The pacing trace from that screen said why: in a window the desktop composes, a third of the times DXGI gave were
+1 to 16 ms after the refresh their count named, in runs of up to forty readings -- the moment the
+desktop composed, not the refresh -- and the count was right. Taken as the grid, each moved the
+refreshes the schedule aimed at by as much; one more than half a refresh late was taken for a
+count that had lost one (105 notes in 50 s), and pictures went on the wrong refresh: 23.843
+pictures a second drawn for 23.975. The graph, which plots where DXGI says each picture went, showed
+it. The same window size and settings here gave none of those times, nor did any other run of those
+days.
+
+So now each reading is held against the grid of refreshes found so far, and the one of the two that
+agrees with it is believed: a time off the grid (by more than 5 % of a refresh, 0.83 ms at 60Hz)
+is left out, the count followed and the grid kept; a count off a time on the grid by the same
+refreshes twice in a row is the count astray, and the times are followed; once, the reading waits.
+Eight times in a row off the grid by the same amount are the refreshes truly moved, and the grid
+moves with them; a count that goes back, or a time neither on the grid nor where its count puts
+it give or take a refresh, starts the schedule again. A reading in doubt teaches nothing of the
+queue's depth nor of a picture shown late. The pacing trace notes each refresh the count lost or
+gained, and the times off the grid, the first and then one in a hundred.
+
+Every pacing trace of those three days, read again: the count went astray in five runs of
+forty-three, four times by refreshes it lost and kept lost (full screen), once by two it lost and
+took back on one refresh, its time not moving (in a window); once the times went half a refresh
+off for a third of a second. `dlssnr_harness --tcadence` has the count lose five refreshes in a
+second, and two and take them back; a third of the times 1 to 16 ms late, in runs; and the
+refreshes themselves moved by 5 ms. The first three show the same pictures on the same refreshes
+as a DXGI that keeps time, and the last neither a picture repeated nor one dropped. With the
+schedule of the morning, the late times gave 126 pictures held one refresh and 163 held four,
+pictures shown from 35.6 ms early to 21.4 ms late: the window as the user saw it.
+
+**Why the times went astray: a desktop with nothing else moving.** The graph stayed irregular in a
+window with that check in place, and the user saw why: it was regular for as long as another program
+animated on the desktop, and irregular again as soon as it stopped. The runs here had always had one
+animating beside the player, the program they were driven from. With nothing else moving, DWM composes
+only when a picture arrives, and then it does not keep time. Two minutes of the 23.976 film in a
+3030x1653 window at 60Hz, the desktop left alone, with the filter as it was: 31.6 % of DXGI's times off
+the grid by 1 to 16 ms, its count behind its times 3.2 times a second, and on the screen 492 film
+pictures held one refresh and 461 held four. The same with a 4-pixel window elsewhere on the screen
+changing on every composition: no time off the grid, no refresh lost, and 3 pictures held one refresh,
+1462 two and 1473 three, the film's still shots apart.
+
+So in a window the filter now gives DWM something to compose on every refresh: a thread draws one pixel
+of the video window again after every vertical blank, under the swap chain's picture, in two colours a
+step apart (`Source/DLSS/DwmKeepAlive.cpp`). The same two minutes with it: no time off the grid, no
+refresh lost, 2 pictures held one refresh, 1464 two and 1471 three, the screen's times within 1.33 ms of its
+refreshes (7.28 without it). A window over the whole of its monitor, the player's fullscreen, is left
+alone: there the pictures go to the screen without DWM. A film started in a window and put fullscreen
+40 s later went to an overlay of its own as it does without the pixel (1348 pictures presented
+there against 1346).
+The trace's first note says whether DWM is being kept composing; `MPCVR_DWM_KEEPALIVE=0` in the
+player's environment leaves it to itself, to measure without. The check on the grid stays for what
+the pixel cannot reach: a window on a monitor of another graphics card, or the variable left at 0.
 
 ### A video delay, for a sound that arrives late
 
@@ -2009,7 +2635,7 @@ due. A line of its own says the rest while a delay is set:
     Video delay   : +40 ms asked for, the picture +37 ms from its own time
 
 Measured in MPC-HC, a 24 fps film in 4K HDR with its Atmos track bitstreamed, fullscreen at
-24 Hz, four starts at each value, the pacing trace reading each picture's refresh against the
+24Hz, four starts at each value, the pacing trace reading each picture's refresh against the
 time stamped on it:
 
 | Video delay | the picture on the screen, after its own time | pictures lost while playing |
@@ -2018,13 +2644,13 @@ time stamped on it:
 | +40 ms | +21.3, +37.1, +43.1, +35.0 ms | none |
 | +80 ms | +57.9, +91.5, +84.6, +75.5 ms | none |
 
-And in the bench's window, the screen at 60 Hz: +40.2 ms for +40, +100.0 for +100, +250.5 for
+And in the bench's window, the screen at 60Hz: +40.2 ms for +40, +100.0 for +100, +250.5 for
 +250 and −99.9 for −100, medians over ten seconds.
 
-**A picture only moves by whole refreshes.** At 24 Hz that is 41.7 ms, so the value asked for
+**A picture only moves by whole refreshes.** At 24Hz that is 41.7 ms, so the value asked for
 is met to the nearest refresh, and which one is drawn afresh at every start and every seek:
 the spread of the table, about twenty milliseconds either way. The line in the statistics says where
-the picture really is. A screen at 120 Hz for a 24 fps film has a refresh every 8.3 ms, and
+the picture really is. A screen at 120Hz for a 24 fps film has a refresh every 8.3 ms, and
 would hold the value five times closer.
 
 The slider applies as it is dragged, since it is set by ear with a film playing, and the
@@ -2040,7 +2666,7 @@ which is normally the audio renderer. The statistics name it:
     Clock         : MPC Audio Renderer
 
 A clock that stops while the sound goes on playing — seen with one third-party audio renderer
-after a very fast pause and play on a 24 Hz display — makes every picture look one frame
+after a very fast pause and play on a 24Hz display — makes every picture look one frame
 further into the future than the one before it, and the picture slows to a crawl while
 everything else carries on. The renderer catches that and says so:
 
@@ -2103,7 +2729,7 @@ presets.
 | Setting | Default | What it does |
 |---|---|---|
 | Use Direct3D 11 (recommended) | on (Windows 8 and later) | Renders with Direct3D 11 instead of Direct3D 9. Everything this fork adds needs it: DLSS, the neural upscalers, the chroma replacement, sharpening, HDR output and render ahead. On Windows 7 the video processor is not available with it |
-| Bit depth | Auto (8 or 10-bit) | The textures the renderer works in. Auto takes 10-bit for a source above 8 bits and with RTX Video HDR, 8-bit otherwise. DLSS 5 NR works in 16-bit float whatever this says; RTX Video HDR does not run in 8-bit |
+| Bit depth | Auto | The textures the renderer works in. Auto takes 16-bit float for HDR output (HDR video sent in HDR, and RTX Video HDR), 10-bit for another source above 8 bits, 8-bit otherwise: in HDR, 10-bit textures round at every step and leave two to five times the banding (see *Dithering*). Before 3.0 Auto took 10-bit for HDR output. DLSS 5 NR works in 16-bit float whatever this says; RTX Video HDR does not run in 8-bit |
 | GPU video processor: NV12, P010/P016, YUY2, Other supported formats | all ticked | The formats the hardware video processor converts. Hardware deinterlacing, RTX Video Super Resolution and RTX Video HDR work on these only. A format left unticked is converted and resized by the shaders, with the methods of the Chroma and Scaling tabs |
 | Deinterlacing: Hardware | On | The video processor's deinterlacing, for an interlaced source in a format it converts. *On, with future frames* is a workaround for drivers on which interlaced video judders |
 | Double the frame rate when deinterlacing | on | One picture a field: 50i plays as 50p, with twice the pictures to process. Needs hardware deinterlacing |
@@ -2113,7 +2739,7 @@ presets.
 
 | Setting | Default | What it does |
 |---|---|---|
-| Chroma upsampling: Method | Catmull-Rom | Rebuilds the colour of 4:2:0 and 4:2:2 video at full resolution when the shaders convert the picture, or for the replacement below; greyed while the video processor converts every format. Ordered best first, as they measured (see *Upscaling* above), and each entry keeps its own number, so a setting already saved still means what it did. Jinc (EWA) is the best of them on film and stays inside the conversion shader; RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv prescaler, FSRCNNX being the one for drawn lines. Those two need Direct3D 11 and 4:2:0 in planes; Catmull-Rom stands in elsewhere |
+| Chroma upsampling: Method | EWA Lanczos Sharp | Rebuilds the colour of 4:2:0 and 4:2:2 video at full resolution when the shaders convert the picture, or for the replacement below; greyed while the video processor converts every format. Ordered best first, as they measured on film along the luma's edges (see *libplacebo's other polar kernels*), and each entry keeps its own number, so a setting already saved still means what it did. EWA Lanczos Sharp, EWA Ginseng and Jinc (EWA) are within a few hundredths of a decibel of one another and stay inside the conversion shader, as does EWA Lanczos4 Sharpest, which keeps more colour overall and less along edges; RAVU-zoom and FSRCNNX 8 AR put Cb and Cr through an mpv prescaler, RAVU-zoom being the one for drawn lines. All but Catmull-Rom, Bilinear and Nearest-neighbor need Direct3D 11 and 4:2:0 in planes; Catmull-Rom stands in elsewhere. Catmull-Rom was the default before 3.0 |
 | Use this method instead of the video processor's chroma upsampling | off | The chroma replacement (see *Who resizes while DLSS runs*). The shaders rebuild the chroma of a progressive 4:2:0 or 4:2:2 picture with the method above and hand the video processor a 4:4:4 one, so the processor stays in the chain and RTX Video HDR goes on working. Interlaced pictures keep the processor's chroma; a stream only marked as one that may be interlaced keeps this until a picture really is. It costs RTX Video Super Resolution, which the driver does not apply to a 4:4:4 picture: *Video Super Resolution* greys while this is ticked, and the statistics say `D3D11 (No Super Resolution when chroma by shaders)`. Needs Direct3D 11 |
 
 ### Scaling
@@ -2126,7 +2752,7 @@ One thing resizes the picture: DLSS Super Resolution if it is ticked, the video 
 |---|---|---|
 | Use the video processor for resizing | on | The video processor resizes instead of the shaders: fast, and below the Upscaling and Downscaling methods, which grey. With DLSS 5 NR on it enlarges what the network leaves. Greyed while a Dolby Vision film plays, which the shaders process whole |
 | Video Super Resolution | Off | The driver's Super Resolution (NVIDIA RTX, or Intel UHD 610 and later) while the video processor enlarges, for sources up to the size chosen. Needs the processor resizing, every format ticked on the Source tab, Windows 10, Direct3D 11 and the 64-bit filter. Greyed while DLSS SR or the chroma replacement is on. With DLSS 5 NR it runs after the network on a 4:2:0 picture, halving the colour resolution again |
-| Upscaling | Jinc2m | Enlarges when the shaders resize. ArtCNN C4F16 DS, RAVU-zoom and the four FSRCNNX entries enlarge the luma with a network; AR holds what it invented to the range the source covers. Ordered best first, each entry keeping its own number. The networks need Direct3D 11; Catmull-Rom stands in elsewhere and while DLSS SR is enlarging |
+| Upscaling | Jinc2m | Enlarges when the shaders resize. ArtCNN C4F16 DS, Anime4K CNN x2 M AR, RAVU-zoom and the four FSRCNNX entries enlarge the luma with a network; AR holds what it invented to the range the source covers. Ordered best first, each entry keeping its own number. The networks need Direct3D 11; Catmull-Rom stands in elsewhere and while DLSS SR is enlarging |
 | Use a lighter filter for small enlargements | off, Jinc2m | Under 5 % on both sides, a slightly cropped 4K film on a 4K screen for instance, the method in the list beside it is used instead: a network costs as much there as for a large enlargement, for nothing visible. The statistics name the method really in use |
 | Downscaling | Hamming | Reduces when the shaders resize. Ordered best first (`--tdownscale`, see *Spline36, and what a downscaler is for*): Lanczos, Bicubic sharp and Spline36 are close |
 | Use DLSS Super Resolution for upscaling | off | Enlarges with DLSS Super Resolution, in place of the video processor and of the Upscaling method, which greys; it cleans grain and compression noise too. Up to 4 times; the Upscaling method finishes a larger enlargement. Works with or without DLSS 5 NR. Experimental (see *DLSS Super Resolution*): moving subjects can still shimmer on grainy film |
@@ -2144,7 +2770,8 @@ One thing resizes the picture: DLSS Super Resolution if it is ticked, the video 
 | Strength | 3 | Five levels; see *Deblocking and debanding*. Greyed while Debanding is off |
 | Sharpening: Method | Off | *Adaptive-Sharpen*, *Unsharp + Clamp* or *AMD CAS*, run after the resize, so it also reaches a film already at the screen's size. See *Sharpening* for what each is worth. Needs Direct3D 11 |
 | Intensity | 3 | Five levels, and a level is the same amount of sharpening whichever method is chosen: Adaptive-Sharpen's +4, +8, +13, +20 and +28 per cent of mean gradient, the other two set to give the same, calibrated through the filter. 3 is where the quality measurements settle. Greyed while Sharpening is Off |
-| Use dithering | on | A very fine noise before output, so that skies and fades to black show no banding |
+| Use dithering | on | A very fine noise before output, so that skies and fades to black show no banding. Only where the textures are deeper than the swap chain: with 10-bit integer textures and a 10-bit swap chain nothing dithers (see *Dithering*) |
+| A new pattern each picture | off | The dither's pattern moved every picture instead of held in place: the eye averages several pictures and sees less of the noise, and no fixed pattern. Direct3D 11; greyed while *Use dithering* is off (see *Dithering*) |
 | Hide the channel logo | off | Hides a TV channel's logo, worked out from under it where it is see-through and filled in from round it where it is opaque, before anything else touches the picture. Each logo found is kept, and recognised on the next films of the same size. See *Hiding a channel's logo*. Stays on with RTX Video Super Resolution; needs Direct3D 11 |
 | Margin | 1 px | The pixels round the logo worked with it, 0 to 3, for an edge the encoder smeared. Greyed while the box is unticked |
 | Find the logo | | Looks for the logo on the film playing and hides it: found in about 15 seconds of the film, hidden from about 30, finished in two minutes. Ticks the box and takes effect at once, with no Apply. The line under it says what it is doing |
@@ -2187,9 +2814,10 @@ key, both DLL paths, and the working size, which is what the card can carry.
 | Windows HDR | Don't change | Whether the filter may turn Windows HDR on by itself when HDR video, or RTX Video HDR, starts: in fullscreen only, or always. *On/off* turns it back off afterwards |
 | Subtitle and OSD brightness | the leftmost | How bright subtitles, the player's messages and the statistics are drawn over an HDR picture |
 | Convert to SDR | on | HDR video not output in HDR is converted to SDR, so that it does not look washed out |
-| Method | Metadata | How that conversion is done. *Fixed*: one curve for every film, the only one up to upstream 0.10.9. *Metadata*: a curve made for the content's peak (MaxCLL, else the mastering display's, else 1000 nits) and the SDR brightness. *Measured*: the same curve, from the peak of each picture, measured on the GPU and smoothed. Where the shaders convert the picture rather than the video processor (Dolby Vision among them), *Measured* works as *Metadata*. Its window, its floor and whether it starts over at a cut are upstream's registry-only values (`SdrPeakWindowMs`, 3000; `SdrPeakFloorNits`, 640; `SdrPeakSceneCuts`, off), which no preset holds |
+| Method | Metadata | How that conversion is done. *Fixed*: one curve for every film, the only one up to upstream 0.10.9. *Metadata*: a curve made for the content's peak (MaxCLL, else the mastering display's, else 1000 nits) and the SDR brightness. *Measured*: the same curve, from the peak of each picture, measured on the GPU and smoothed. Where the shaders convert the picture rather than the video processor (Dolby Vision among them), *Measured* works as *Metadata*. Its window and its floor are upstream's registry-only values (`SdrPeakWindowMs`, 3000; `SdrPeakFloorNits`, 640), which no preset holds; whether it starts over at a cut is the box below |
 | SDR brightness | 125 nits | The target of that conversion, 25 to 400. Applies as the slider is dragged |
-| RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough or a tone map method, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs. The driver leaves out a picture the processor writes in fewer than 640x360 pixels, and the line then adds `left out by the driver under 640x360`; where the shaders resize, the processor first enlarges such a picture just past that, which the Processor step says (`to 740x312 for RTX Video HDR`) -- see *RTX Video HDR on a small picture* |
+| RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough or a tone map method, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs. The driver leaves out a picture the processor writes in fewer than 640x360 pixels, and the line then adds `left out by the driver under 640x360`; where the shaders resize, the processor first enlarges such a picture just past that, which the Processor step says (`to 740x312 for RTX Video HDR`) -- see *RTX Video HDR on a small picture*. The driver applies it only when the NVIDIA app has it on, as bright as the app says: the statistics give both, and what the driver wrote (*What the driver is set to, and what it writes*) |
+| Start over at a scene cut | off | Beside *Measured peak*. The measured peak, of the tone mapping (*Measured peak*) and of the conversion to SDR (*Measured*), is smoothed over three seconds; with this, a jump in the mean brightness is taken for a cut and the smoothing starts over, so that the new scene's peak is used from its first picture (`SdrPeakSceneCuts`, upstream's registry-only value, on the page since 3.0). A cut that changes the highlights and not the mean is not seen as one; a one-frame flash is drawn with its own peak and leaves the smoothing alone. Available while one of the two measurements is in use; not carried by a preset (see *Following the peak*) |
 
 ### Presentation
 
@@ -2198,9 +2826,13 @@ key, both DLL paths, and the working size, which is what the card can carry.
 | Swap effect | Flip (recommended) | How pictures are handed to Windows. Render ahead needs Flip to give each picture a refresh. *Discard* is the older mode, for drivers that misbehave with Flip. HDR output always uses Flip |
 | Use exclusive fullscreen | off | In fullscreen the filter takes the display directly instead of going through the desktop: less latency, but menus drawn over the film may not show and Alt+Tab is slower |
 | Reinitialize device when changing display | off | Creates the Direct3D device again when the window moves to another screen |
-| Render ahead: a refresh chosen for each picture | on | See *Render ahead* and *A refresh chosen for every picture*. Gives every picture a refresh chosen in advance, and starts each early enough for it. Needs Direct3D 11, and the flip model for the first of the two. Registry `DlssRenderAhead` |
 | Wait for VBlank before Present | off | Upstream's timing, with render ahead off: waits for the next refresh before each picture. Greyed while render ahead is on, which never waits for it |
 | Adjust the frame presentation time | on | Upstream's timing, with render ahead off: holds each picture until half a refresh before its time. Greyed while render ahead is on, which always holds the pictures it does not schedule |
+| Render ahead: a refresh chosen for each picture | on | See *Render ahead* and *A refresh chosen for every picture*. Gives every picture a refresh chosen in advance, and starts each early enough for it. Needs Direct3D 11, and the flip model for the first of the two. Registry `DlssRenderAhead` |
+| *Frame Pacing Workarounds*, greyed with render ahead off: | | |
+| Hide the 60Hz hiccup on scene changes | off | See *Cadence slips: on a scene cut, or a picture made between two*. The refresh a film at 23.976, 29.97 or 59.94 fps owes a screen at 60Hz every few seconds -- two pictures in a row held three refreshes at 23.976 -- waits for the next change of shot, where it is not seen. It runs only where such hiccups come often: 23.976, 29.97 and 59.94 fps at 60Hz (and 120 or 144Hz), 23.976 fps on a 24Hz mode and 24 fps on 23.976Hz; elsewhere nothing is copied or measured and the statistics say `none owed at this rate`. Registry `CadenceSlips` 1 |
+| Otherwise, show an interpolated frame | off | When no change of shot comes in time, the refresh added shows a frame EchoFG makes between the two pictures. Needs the box above, and Direct3D feature level 11_1. Registry `CadenceSlips` 2 |
+| Windows 23Hz stutter: rebuild the swap chain | on | See *A swap chain that starts skipping flips*. A bug of Windows' graphics kernel, which after a while at 23.976Hz holds every picture to 1/23 s: the swap chain is rebuilt when pictures ready in time are shown late. Unticked, the stutter stays as Windows leaves it. Registry `SwapChainRenew` |
 | Show statistics | off | The statistics over the picture; Ctrl+J in MPC-HC |
 | Size | Fixed size | Whether the statistics keep their size or grow with the window |
 | Video delay | 0 ms | See *A video delay, for a sound that arrives late*. Every picture shown that long after its time, −200 to +500 ms, to the nearest refresh. Applies as the slider is dragged |
@@ -2298,6 +2930,7 @@ steps work in.
 | DLSS 5 NR | The network's tuning, or why it is not running. *working* is the reduction and the composition at a working size below the picture's; *stabilizer* its Optical Flow and the stabilizer. The network runs on a Direct3D 12 device of its own and is timed there, by timestamps on its queue |
 | Scaling | From what size to what size, and what does it, with all it costs: the processor's second turn after DLSS 5 NR, DLSS SR and its *motion*, or an mpv prescaler, each with the resize shader that finishes the job. `SuperResolution*` when the driver's Super Resolution runs, and `(No Super Resolution when chroma by shaders)` when it was asked for on a 4:4:4 picture. When the processor resized in its own step, a time here is only the resize shader copying the picture to its place -- a film with black bars, or one in a window -- and the line says `placed by the shaders`: 0.5 ms for a 2.39:1 film on a 4K screen, which is not Super Resolution's (that is in the processor's time). With *DLSS SR* ticked and not enlarging, a sub-line says why |
 | Finish | What runs at the size the picture is shown at: a correction, the tone mapping, the sharpening and its level, the player's shaders, the dither |
+| Cadence | With *Hide the 60Hz hiccup on scene changes*: the picture copied out of the back buffer and measured for a scene change, every picture while a hiccup may come. Under it, *EchoFG* is the interpolated frame (*Otherwise, show an interpolated frame*): the median of its last five times on the GPU, each brought to the GPU's clock of the moment, which decides whether one is made, and not in the total, since it is made every few seconds and not for every picture |
 
 Each time is the mean of the last 32 pictures, measured on the GPU with timestamps read back
 later, never waited for, and only while the statistics are shown. A step whose text does not
@@ -2312,6 +2945,8 @@ to SDR is in Finish's. **HDR measured** follows it while the peak is measured (*
 or the *Measured* method of the conversion to SDR): the brightest of the last picture measured
 and the peak the curve was given, smoothed over the window. The GPU measures the picture just
 before the correction or the tone mapping reads it, so that time is in Finish's too.
+**NVIDIA app**, **RTX HDR set** and **RTX HDR out** say what the NVIDIA app has the driver do
+with RTX Video and what the driver wrote (see *What the driver is set to, and what it writes*).
 
 **The timing**, in the order it happens to a picture. Its figures change with every picture,
 so each keeps its width -- the offsets to a tenth of a millisecond -- and a line does not move
@@ -2331,6 +2966,11 @@ as they change:
   what decides when each picture is presented.
 - *Sync offset* and *On screen*: see *A film at the screen's own rate* and *A refresh chosen
   for every picture*. *Video delay* follows them when one is set.
+- *Hiccups*, with the hiccup hidden on scene changes: how many of the cadence's slips went on a
+  scene change, how many did `not` -- no scene change came in time, and the slip was taken where
+  the cadence put it, seen as before -- and in brackets how many of those an interpolated frame
+  covered and how many interpolated frames came out `too late` and were left out:
+  `Hiccups : 9 on scene changes, 2 not (1 interpolated)`.
 - *Frames*: the samples received, those the renderer left undrawn for coming too late, the
   second fields of a deinterlaced picture left out, and the pictures that failed; *turns lost*
   and *turns late* when a picture's turn in the renderer was taken away or came late, the
@@ -2422,7 +3062,7 @@ compositor's flip waits behind it, and one that goes more than about 40 ms after
 blank loses the refresh. Every hold-up fell on that thread's period, 1.006 s; without an AI
 upscaler its turns never passed 3.5 ms and nothing was held up. Hardware decoding, the
 statistics and the film's cuts had nothing to do with it. A film from 15:27 to 21:27 at
-23.976 Hz in MPC-HC 2.8.4, 4K HDR, the video processor resizing with RTX Video Super
+23.976Hz in MPC-HC 2.8.4, 4K HDR, the video processor resizing with RTX Video Super
 Resolution and RTX Video HDR, RTX 4060 (driver 32.0.16.1742), traced with ETW (xperf: the GPU
 scheduler, the compositor, DXGI, thread switches) beside the pacing trace:
 
@@ -2511,6 +3151,23 @@ dlssnr_harness.exe --tautomask <dir> DLSS 5 NR with and without its auto mask on
 dlssnr_harness.exe --tcutscan <film> the cut detection alone over minutes of a film, decoded by ffmpeg: its four
                                   measures on every picture, with ffmpeg's own scene score beside them
                                   (--cutfrom <s> --cutfor <s>: the stretch, 300 s by default)
+dlssnr_harness.exe --tcadence     the cadence slips' schedule against a simulated screen: 23.976, 29.97
+                                  and 59.94 at 60Hz with cuts every 4 s, every 29 s and none, 24, 25
+                                  and 30 left alone, a film at the screen's own rate drifting both ways,
+                                  a made picture too long for a 2 put on a 3, DXGI's refresh count
+                                  losing refreshes against its times
+dlssnr_harness.exe --tcadencecut <film>   the cadence slips' own cut detector over a stretch of a film,
+                                  beside ffmpeg's scene score (--cutfrom, --cutfor; --hdr: as PQ)
+dlssnr_harness.exe --tcadencemade the picture made for a slip: EchoStorm's own synthesis and the
+                                  filter's Direct3D 11 port on the same pair, to the byte, in cells
+                                  of 2 and of 4 (with EchoStorm's code in external\framegen\echostorm),
+                                  and what each part costs
+dlssnr_harness.exe --techoperf    EchoFG on the GPU pass by pass, the port against EchoStorm's own
+                                  Direct3D 12 code run in turn with it, and the other ways it can be
+                                  run (cells of 1, 2, 4; the motion at a quarter and at the full size),
+                                  each with its picture against the one truly between the two
+                                  (--techotriplet <prefix> [--hdr]: <prefix>_1.png .. _3.png, three
+                                  pictures of a film in a row, the second the one to make)
 dlssnr_harness.exe --tupscale     the resize shaders and the mpv prescalers on film frames
 dlssnr_harness.exe --tupscalecost what EfRLFN costs at film sizes
 dlssnr_harness.exe --tchroma      the chroma upsamplers on 4:2:0 made from film frames
@@ -2575,10 +3232,12 @@ the chroma section above come from it.
 
 **The pacing trace, and `pacing_report.py`** — what became of every picture on its way to the
 screen, in any player. Set the environment variable `MPCVR_PACING_TRACE` to a file name before
-the player starts and the renderer writes a line a picture there, when the stream is flushed
-and when the player closes: when the sample arrived, was drawn and presented, what the
-reference clock said, the refresh it was meant for, and DXGI's account of the swap chain before
-and after the call. Nothing is written, and nothing is kept, without the variable.
+the player starts and the renderer writes a line a picture there, a thousand pictures at a
+time as the film plays -- forty seconds of a 24 fps film, so that a long session can be read
+while it goes on -- and the rest when the player closes: when the sample arrived, was drawn
+and presented, what the reference clock said, the refresh it was meant for, and DXGI's account
+of the swap chain before and after the call. Nothing is written, and nothing is kept, without
+the variable.
 
 ```
 set MPCVR_PACING_TRACE=C:\temp\pacing.csv
@@ -2613,6 +3272,10 @@ their time in the stream (from the last seek), and the ten that came closest wit
 called: the detection's measures are read back from the GPU a few pictures later, never waited
 for, and written on the line of the picture they belong to.
 
+`pacing_report.py trace.csv --peak` follows the HDR peak measurement across the cuts the cadence
+slips' detector found (*Following the peak*): each picture's own peak, the peak the curve was
+given and how many pictures the window held, read back the same way, a few pictures later.
+
 A session that stops by itself shows there as pictures DLSS no longer ran on under a note
 that still asks for it, and nowhere else: the film goes on playing. To see what the renderer
 does about it, `MPCVR_DLSSNR_FAIL_AT=100` in the player's environment makes every hundredth
@@ -2620,7 +3283,19 @@ evaluation of DLSS 5 NR give up (see *An evaluation that fails*).
 
 The first note of a trace is the swap chain: its size, how many buffers it has and whether it
 is exclusive. `MPCVR_SWAPCHAIN_BUFFERS=n` forces that count (see *A refresh chosen for every
-picture*).
+picture*). `MPCVR_SWAPCHAIN_RENEW=0` leaves flips the system holds back as they are, with a note
+each time the swap chain would have been renewed (see *A swap chain that starts skipping
+flips*), for as long as the system's own tools need them to last. `MPCVR_DWM_KEEPALIVE=0`
+leaves DWM to compose when it likes in a window (see *Why the times went astray*).
+
+With the hiccup hidden on scene changes, a picture's flags say whether it was a slip taken on a cut, a forced
+one, or a picture made for one (written on a line of its own, at its own time between the two),
+and whether the slips' detector called it a cut; its cut columns hold that detector's measures
+when DLSS Super Resolution's own does not run. `pacing_report.py` counts the slips of a 3:2
+cadence and how each was taken. `MPCVR_CADENCE_NOCUT=1` traces what the detector says and takes
+no slip on it, so that every slip is forced and, with *Otherwise, show an interpolated frame*,
+covered by one;
+`MPCVR_CADENCE_DUMP=<folder>` keeps the first six made pictures (see *Cadence slips*).
 
 Each line also has, since 2.5: when the GPU was seen done with the picture while it waited for
 its `Present` (0 when it was not done by then), the picture's stamp and the time the schedule
@@ -2638,7 +3313,7 @@ on the performance counter, as in the pacing trace, so the two files line up to 
 microsecond.
 
 ```
-cadence_watch.exe --out C:\temp\screen.csv --seconds 120 [--delay 8] [--shot C:\temp\osd.bmp]
+cadence_watch.exe --out C:\temp\screen.csv --seconds 120 [--delay 8] [--shot C:\temp\osd.bmp [--shotrect l,t,r,b]]
 python cadence_report.py C:\temp\screen.csv [--hz 23.976] [--fps 23.976] [--list 40]
 ```
 
@@ -2647,8 +3322,9 @@ stayed, and each fault with its time and how long after a cut it came: a picture
 shorter than the film's rate on that screen allows, two held alike in a 3:2 cadence (a break),
 a picture that is the one before again, or the one before that (a single-frame flash in the
 film does that too), and the green block moving other than one pixel. `--shot` keeps a picture
-of the statistics as the watch starts. The duplication is work for the compositor: it doubled
-the rare refreshes the compositor missed at 23.976 Hz.
+of the statistics as the watch starts; with `--shotrect`, the part of the screen it names in
+fractions of it, at its own size: the statistics' graph at the bottom right of a window, say. The duplication is work for the compositor: it doubled
+the rare refreshes the compositor missed at 23.976Hz.
 
 **`freeze_dump.exe`** — run against a player that hangs (by name, by process id, or with no
 argument at all), it asks Windows what every thread is waiting for, names any cycle as the
@@ -2710,6 +3386,7 @@ playback_test.exe --greying       what the page greys, for every state the rende
 playback_test.exe --afternr --file <mkv> --seek 1740   who enlarges after DLSS 5 NR, on one still of a real film
 playback_test.exe --vpturns --file <film> --rtxhdr 1 --hdrout 1   the shaders, the processor, the processor with Super Resolution: one still each, read off the desktop unclipped (vpturns_N.pfm)
 playback_test.exe --file <film> --hdrtm 7 --measurepeak 1   HDR output: -1 off, 0 passthrough, 1..7 a tone mapping; --dovitm 0|6, --sdrtm 0..2, --tosdr, --prefdovi
+playback_test.exe --file <film> --aftergrab   the same paused picture on the screen before and after GetCurrentImage (a player's Save image)
 playback_test.exe --hz 30 --fps 30 --jolt   a film at the screen's own rate, and the queue it builds
 playback_test.exe --presets     two presets saved, each recalled by its key while it plays
 playback_test.exe --rewindow    the video window made again from another thread, and whose it is
@@ -2717,6 +3394,12 @@ mpchc_drive.exe <mpc-hc64.exe> <film>   a real MPC-HC taken through the options;
 mpchc_drive.exe --attach 40     watch a running MPC-HC: windows made or lost, pointer shown or hidden, each timed
 dlssnr_harness.exe --tdownscale  what each downscaler keeps and what it lets fold back
 dlssnr_harness.exe --tdownport   and that those shaders are the kernels they are written from
+dlssnr_harness.exe --tdither     the dither before output: the final passes that ship against their sum, held still and
+                                 moved, what rounding, the dither and ten-bit textures leave of a ramp, and what half
+                                 floats cost at 4K (--study: pictures for CAMBI)
+dlssnr_harness.exe --ttonemap    the measured peak HDR tone mapping follows, against libplacebo's, across cuts
+dlssnr_harness.exe --tupscale|--tdownscale --mpvextra <dir>   more mpv shaders, translated by mpv_shaders.py, beside
+                                 the ones measured: candidates kept out of upscalers\hlsl and of the battery
 playback_test.exe --scalers --size 1920x1038 --window 2496x1349   every upscaler at a small ratio
 playback_test.exe --sharpencal --file <film> --window 3200x1334 --vpscale 0 --calup 5   each sharpener's gain in detail against its strength, and its levels read back
 playback_test.exe --scalers --size 3836x2160 --window 3840x2160 --small 5   the stand-in under 5 %
@@ -2727,6 +3410,8 @@ playback_test.exe --mainpage 10 --section 4   on one of the seven tabs; --apply 
 playback_test.exe --frame 10      the page in a real property frame, as a player puts it up
 playback_test.exe --frame 10 --themed   and with a player painting its controls over it
 playback_test.exe --chroma <png>  each chroma upsampler, the hardware one included, against 4:4:4
+playback_test.exe --chroma <png> --ewa   libplacebo's polar kernels instead, through the Jinc (EWA) entry
+playback_test.exe --chroma <png> --size 1920x800 --upscale [--ewa]   the same enlarged to twice the size, against the 4K original too
 playback_test.exe --chroma10 <png> the same in 10 bits: P010 against Y410 (--interlaced: who converts)
 playback_test.exe --clean <png>   the picture coded as MPEG-2 intra blocks, deblocked by each path (--clean10: P010)
 playback_test.exe --file <film> --deblock 3 --deband 2   a real film with the artifact removal at those levels (--spp: SPP)
@@ -2740,6 +3425,8 @@ playback_test.exe --logo --file <film>   Find the logo pressed on a real film, t
 playback_test.exe --toggle       each setting changed in full playback, as the player does
 playback_test.exe --toggle --gpu --hdr --switch   as a hardware decoder feeds it, in HDR
 playback_test.exe --toggle --file <mkv> --seek 1740   a real film, split and decoded
+playback_test.exe --file <film> --cadence N   the cadence slips: 0 where they fall, 1 on a cut, 2 else made
+playback_test.exe --file <film> --peakcuts 0|1   the measured peak starts over at a cut or not (pacing_report.py --peak)
 playback_test.exe --nrscale 70 --nrscaleto 100   DLSS 5 NR's working size, and another taken while it plays
 playback_test.exe --filter <ax>   any of the above with another build of the x64 filter
 ```
@@ -2792,7 +3479,12 @@ MPC Video Renderer is by **Aleksoid1978** and contributors and is licensed **GPL
 
 **OSD Plus**, the statistics' source, audio and hardware lines and their colours
 (`Source/OsdPlus/`), is by **rampageX** (`github.com/rampageX/MPCVR-Plus`, GPLv3), taken from
-his release 1.0.5 with thanks.
+his release 1.0.5 with thanks. The settings page's dark theme in MPC-BE
+(`Source/SettingsPage/HostDialogTheme.h`) is his too, from his pull request #6.
+
+Where the NVIDIA app keeps RTX Video's switches and sliders (`Source/NvidiaAppSettings.h`) was
+learnt from **FrankyRenderer** by **mryx007** (`github.com/mryx007/FrankyRenderer`,
+GPL-3.0-or-later), which reads them the same way.
 
 The NGX ABI declarations in `Source/DLSS/NGXTypes.h` are hand-written from the publicly
 documented shape of the interface. NVIDIA DLSS, NGX and the `nvngx_*` / `_nvngx.dll`
@@ -2805,8 +3497,10 @@ authors' notices: **FSRCNNX** is Copyright (C) 2017-2021 **igv**
 (`github.com/bjin/mpv-prescalers`), both under the **GNU Lesser General Public License 3.0 or
 later**, whose text is in `Shaders/mpv/LICENSE.LGPL-3.0.txt`. **ArtCNN** is Copyright (c) 2024
 **João Chrisóstomo** (`github.com/Artoriuz/ArtCNN`) under the **MIT** licence, whose text is in
-`Shaders/mpv/LICENSE.MIT.txt`. Only the shaders are taken; the translation to HLSL and
-everything that runs them is part of this fork and GPLv3 like the rest.
+`Shaders/mpv/LICENSE.MIT.txt`, as is **Anime4K**, Copyright (c) 2019-2021 **bloc97**
+(`github.com/bloc97/Anime4K`), taken at version 3.2 from the copy in hooke007's mpv_PlayKit.
+The release zip carries both licence texts. Only the shaders are taken; the translation to HLSL
+and everything that runs them is part of this fork and GPLv3 like the rest.
 
 The **Adaptive-Sharpen** pass in `Shaders/d3d11/ps_sharpen.hlsl` is translated from
 **bacondither**'s mpv shader, version 2021-10-17 (`github.com/bacondither/Adaptive-sharpen`),
@@ -2830,6 +3524,12 @@ picture without it, those of **LogoScan** (`github.com/DeepRegular/LogoScan`); t
 edges after Özay and Sankur (EUSIPCO 2009) and the iterative refinement after Erofeev et al.
 (GraphiCon 2011); the fill is Gortler et al.'s push-pull. FFmpeg's `removelogo` and `delogo`
 were the anchors it was measured against.
+
+**EchoStorm**'s motion estimate, its FlowFix and its frame synthesis, EchoFG
+(`Source/FrameGen/echo/`, `Shaders/d3d11/cs_echo_*.hlsl`), are ported from its Direct3D 12 code
+at revision 8d3eac3 (`github.com/Echo-Storm/ls-addon-manager`), Copyright (c) 2026 Echo-Storm and
+andreiday, under the **MIT** licence, whose text is in `Source/FrameGen/echo/EchoStorm-LICENSE.txt`;
+its notice travels with each file. Here they make the picture a cadence slip adds.
 
 `Source/DLSS/NvOF/` holds the two interface headers of the NVIDIA Optical Flow SDK 5.0.7,
 copied unchanged. Each carries its own permission notice ("This copyright notice applies to

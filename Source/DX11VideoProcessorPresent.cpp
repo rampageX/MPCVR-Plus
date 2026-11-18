@@ -76,8 +76,70 @@ void CDX11VideoProcessor::ReadPresentSchedule()
 	if (hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT) {
 		m_PresentSchedule.Reset(); // the counts start again: a mode change, a new output
 	} else if (SUCCEEDED(hr)) {
-		m_PresentSchedule.Seen(last, stats, m_dRefreshPeriodMs);
+		const int astray = m_PresentSchedule.Seen(last, stats, m_dRefreshPeriodMs);
+		if (astray && m_PacingTrace.Enabled()) {
+			m_PacingTrace.Note(std::format(L"DXGI's refresh count {} {} refresh(es) against its own times: gone by the times",
+				astray < 0 ? L"lost" : L"gained", std::abs(astray)));
+		}
+		// Times off the refreshes come in the hundreds in a window: the first is noted, then
+		// one in a hundred.
+		const unsigned offGrid = m_PresentSchedule.TimesOffGrid();
+		if (offGrid && (m_offGridNoted == 0 || offGrid >= m_offGridNoted + 100) && m_PacingTrace.Enabled()) {
+			m_offGridNoted = offGrid;
+			m_PacingTrace.Note(std::format(L"DXGI's refresh times off the refreshes' grid {} time(s) so far: gone by the count", offGrid));
+		}
 	}
+}
+
+// A swap chain whose flips the system has begun to hold back, one picture in about a
+// second shown a refresh late although it was ready in time, is resized to its own size,
+// which ended it every time it was tried (CPresentSchedule::kStuckRun): a few pictures
+// lost once, where it would otherwise have cost two hitches a second for as long as the
+// film went on. Done before the back buffer is taken, so that nothing holds it. Should it
+// come back within a minute, renewing is not what it needs, and it is not tried again on
+// this swap chain.
+//
+// The setting (Frame Pacing Workarounds, bSwapChainRenew) unticked, or MPCVR_SWAPCHAIN_RENEW=0 in the
+// environment, leaves them held back, with a note in the trace each time the swap chain
+// would have been renewed: the system's own tools see what holds them back only while it
+// lasts.
+void CDX11VideoProcessor::RenewSwapChainIfStuck()
+{
+	static const bool s_bRenew = [] {
+		wchar_t value[16] = {};
+		const DWORD length = GetEnvironmentVariableW(L"MPCVR_SWAPCHAIN_RENEW", value, (DWORD)std::size(value));
+		return !(length == 1 && value[0] == L'0');
+	}();
+	if (!m_bScheduled || m_bExclusiveScreen || m_bSwapChainRenewGivenUp || !m_pDXGISwapChain1) {
+		return;
+	}
+	if (!m_PresentSchedule.FlipsStuck()) {
+		return;
+	}
+	if (!s_bRenew || !m_bSwapChainRenew) {
+		m_PacingTrace.Note(std::format(L"swap chain not renewed ({}): {} pictures ready in time shown late, {:.1f} refreshes apart",
+			s_bRenew ? L"the setting is off" : L"MPCVR_SWAPCHAIN_RENEW=0", CPresentSchedule::kStuckRun, m_PresentSchedule.StuckSpacing()));
+		return;
+	}
+	const uint64_t tickNow = GetPreciseTick();
+	if (m_tickSwapChainRenewed && (double)(tickNow - m_tickSwapChainRenewed) < 60.0 * GetPreciseTicksPerSecond()) {
+		m_bSwapChainRenewGivenUp = true;
+		DLog(L"CDX11VideoProcessor::RenewSwapChainIfStuck() : skipped flips again within a minute, renewing given up");
+		m_PacingTrace.Note(L"swap chain: flips skipped again within a minute of renewing it, not renewed again");
+		UpdateStatsPresent();
+		return;
+	}
+	const UINT w = m_windowRect.Width();
+	const UINT h = m_windowRect.Height();
+	const HRESULT hr = m_pDXGISwapChain1->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0);
+	m_tickSwapChainRenewed = tickNow;
+	m_nSwapChainRenewed++;
+	const double spacing = m_PresentSchedule.StuckSpacing();
+	DLog(L"CDX11VideoProcessor::RenewSwapChainIfStuck() : {} pictures ready in time shown late, {:.1f} refreshes apart, resized to {}x{}: {}",
+		CPresentSchedule::kStuckRun, spacing, w, h, HR2Str(hr));
+	m_PacingTrace.Note(std::format(L"swap chain renewed ({}x{}, {:#x}): {} pictures ready in time shown late, {:.1f} refreshes apart",
+		w, h, (unsigned)hr, CPresentSchedule::kStuckRun, spacing));
+	UpdateStatsPresent();
 }
 
 // The wait between a picture being drawn and the moment chosen to present it. The GPU
@@ -160,10 +222,11 @@ void CDX11VideoProcessor::NoteSwapChainForTrace()
 		return;
 	}
 	const std::wstring note = std::format(
-		L"swap chain {}x{} format {} buffers {} effect {} flags {:#x}, refresh {:.4f} ms, wait for vblank {}, adjust present time {}, render ahead {}, exclusive {}, video delay {} ms",
+		L"swap chain {}x{} format {} buffers {} effect {} flags {:#x}, refresh {:.4f} ms, wait for vblank {}, adjust present time {}, render ahead {}, exclusive {}, video delay {} ms, dwm kept composing {}",
 		desc.Width, desc.Height, (int)desc.Format, desc.BufferCount, (int)desc.SwapEffect, desc.Flags,
 		m_dRefreshPeriodMs, m_bVBlankBeforePresent ? 1 : 0, m_bAdjustPresentTime ? 1 : 0, RenderAheadActive() ? 1 : 0,
-		m_bExclusiveScreen ? 1 : 0, m_rtVideoDelay / 10000);
+		m_bExclusiveScreen ? 1 : 0, m_rtVideoDelay / 10000,
+		m_DwmKeepAlive.Now() == CDwmKeepAlive::Drawing ? L"yes" : m_DwmKeepAlive.Now() == CDwmKeepAlive::Waiting ? L"no, not in a window" : L"no");
 	if (note != m_strTraceNote) {
 		m_strTraceNote = note;
 		m_PacingTrace.Note(note);
@@ -196,7 +259,11 @@ void CDX11VideoProcessor::NoteDlssForTrace()
 
 int CDX11VideoProcessor::GetRenderAhead()
 {
-	return RenderAheadActive() ? m_RenderAhead.GetAhead() : 0;
+	// A cadence slip that may end on a made picture wants the sample a refresh and the
+	// made picture earlier (CadenceUpdateAhead); never more than render ahead's own bound.
+	return RenderAheadActive()
+		? std::min(m_RenderAhead.GetAhead() + m_cadenceAhead.load(std::memory_order_relaxed), (int)(CRenderAhead::kMaxAheadMs * 10000.0))
+		: 0;
 }
 
 // Render ahead, first half: a marker after the picture's last command, which tells

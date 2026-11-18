@@ -348,6 +348,29 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		}
 	}
 
+	// The cadence slips: every picture copied out and measured for a scene change while a
+	// slip may come, and the interpolated frame made for one no scene change came in time
+	// for. That one is made every few seconds and not for every picture: its time is
+	// EchoFG's own, timed on the GPU and brought to the GPU's pace of the moment (the median
+	// of the last five, which decides whether one is made), and is not in the total.
+	if (m_iCadenceSlips != CADENCE_SLIPS_Off && (m_PresentSchedule.SlipsPlaced() || Ms(CGpuStageTimes::Cadence) >= 0)) {
+		Step(L"Cadence", L"picture copied, scene change detector", Ms(CGpuStageTimes::Cadence));
+		if (m_iCadenceSlips == CADENCE_SLIPS_OnCutOrMade) {
+			std::wstring text;
+			double ms = -1;
+			if (m_bCadenceMakeFailed) {
+				text = L"no interpolated frames here (feature level 11_1)";
+			} else if (!m_cadenceEchoCount) {
+				text = L"interpolated frame, not timed yet";
+			} else {
+				text = std::format(L"interpolated frame {}x{}, not in the total",
+					m_cadenceRect.Width(), m_cadenceRect.Height());
+				ms = CadenceEchoMs();
+			}
+			Line(L"    EchoFG", text, ms, false);
+		}
+	}
+
 	// What the steps cost together, against the time a picture lasts: the first thing
 	// to look at when pictures come late.
 	const double frameMs = m_pFilter->m_FrameStats.GetAverageFrameDuration() / 10000.0 / (m_bDoubleFrames ? 2 : 1);
@@ -385,6 +408,30 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 			? std::clamp(m_fHdrSmoothedPeakNits, static_cast<float>(m_iSDRDisplayNits) + 1.0f, 10000.0f)
 			: std::min(m_fHdrSmoothedPeakNits, 10000.0f);
 		Line(L"  HDR measured", std::format(L"frame peak {:.0f}, used {:.0f} nits", m_fHdrMeasuredPeakNits, usedNits), -1, false);
+	}
+	// RTX Video is the driver's, applied as the NVIDIA app has it set, and Direct3D says
+	// nothing of either: what the app is set to, then what the driver really wrote --
+	// the brightest picture's peak, the peak over the window and the mean, beside the
+	// peak the display reports. A renderer that tone maps the driver's output to the
+	// display's peak changes the picture where the first goes past the last.
+	if (m_VendorId == PCIV_NVIDIA && (m_bVPRTXVideoHDR || m_iVPSuperRes != SUPERRES_Disable)) {
+		const auto& app = m_NvidiaApp.Get();
+		Line(L"  NVIDIA app", CNvidiaAppSettings::DescribeSwitches(app), -1, false);
+		if (m_bVPRTXVideoHDR) {
+			if (const std::wstring hdr = CNvidiaAppSettings::DescribeHdr(app); !hdr.empty()) {
+				Line(L"  RTX HDR set", hdr, -1, false);
+			}
+		}
+	}
+	if (m_bRtxHdrMeasureActive && m_fHdrMeasuredPeakNits > 0.0f) {
+		const std::wstring over = m_iSdrPeakWindowMs > 0
+			? std::format(L"over {:g} s", m_iSdrPeakWindowMs / 1000.0) : std::wstring(L"smoothed");
+		std::wstring text = std::format(L"peak {:.0f}, {} {:.0f}, mean {:.0f} nits",
+			m_fHdrMeasuredPeakNits, over, m_fHdrSmoothedPeakNits, m_fHdrMeasuredAvgNits);
+		if (m_MaxDisplayLuminance >= 100) {
+			text += std::format(L"; display {} nits", m_MaxDisplayLuminance);
+		}
+		Line(L"  RTX HDR out", text, -1, false);
 	}
 
 	// -- How the picture reaches the screen, in the order it happens.
@@ -437,6 +484,26 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		}
 		str += std::format(L", scheduled: repeated {}, dropped {}, shown late {}",
 			m_PresentSchedule.RepeatedCount(), m_PresentSchedule.DroppedCount(), m_PresentSchedule.LateCount());
+		// The cadence slips placed, on a line of their own: on the line above they took it
+		// out of the box. On a scene change, not on one for want of one in time, and of those
+		// how many an interpolated frame covered and how many interpolated frames came too
+		// late to be shown. "Elsewhere" read as a place on the screen.
+		if (m_iCadenceSlips != CADENCE_SLIPS_Off && !m_PresentSchedule.SlipsPlaced()
+				&& !m_PresentSchedule.SlipsOnCut() && !m_PresentSchedule.SlipsForced()) {
+			// 24 fps at 60Hz, 25 at 50Hz, a film at the screen's own rate: nothing owed often
+			// enough to be watched for (CPresentSchedule::kSlipsOften), nothing copied.
+			str += L"\nHiccups       : none owed at this rate";
+		} else if (m_iCadenceSlips != CADENCE_SLIPS_Off) {
+			// Short enough for three-digit counts, two hours of film, within the box.
+			str += std::format(L"\nHiccups       : {} on scene changes, {} not", m_PresentSchedule.SlipsOnCut(), m_PresentSchedule.SlipsForced());
+			if (m_iCadenceSlips == CADENCE_SLIPS_OnCutOrMade) {
+				str += std::format(L" ({} interpolated", m_PresentSchedule.MadeShown());
+				if (m_cadenceMadeLate) {
+					str += std::format(L", {} too late", m_cadenceMadeLate);
+				}
+				str += L')';
+			}
+		}
 	} else
 	if (m_bDlssRenderAhead && m_UsedSwapEffect == DXGI_SWAP_EFFECT_DISCARD && m_pFilter->m_filterState == State_Running) {
 		// Worth saying, since the remedy is one setting away: the Discard swap effect
