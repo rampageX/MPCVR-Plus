@@ -1,6 +1,6 @@
 # OSD Plus (rampageX fork)
 
-## Version 1.0.9 (test build)
+## Version 1.0.9
 
 Integrates the pinned MPCVR-Plus 3.0 release (`3157c1123d0d20139cab8bbd28bcdd3c6412d928`), including
 new chroma upsamplers, Anime4K, temporal dithering, HDR scene-cut handling,
