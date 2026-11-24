@@ -27,6 +27,7 @@
 #include "SettingsPage.h"
 #include "Greying.h"
 #include "HostDialogTheme.h"
+#include "../HdrCurve.h"
 
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -78,21 +79,33 @@ static std::wstring StabilizerText(int value)
 }
 
 // What the stabilizer's Optical Flow divides the working picture by; 1 is the picture
-// itself, 0 Auto. On the slider, 1/4, 1/3, 1/2, Full and Auto from left to right: the
-// fraction of the picture, which a bare 4 did not say.
+// itself, 0 Auto, DLSSNR_FLOW_TWO_THIRDS two thirds of it. On the slider, 1/4, 1/3, 1/2,
+// 2/3, Full and Auto from left to right: the fraction of the picture, which a bare 4 did
+// not say. The notches are a table, since 2/3 came after the others and is saved as a
+// value of its own: the order on the slider is not the order of the values.
+static constexpr int s_FlowNotches[] = { 4, 3, 2, DLSSNR_FLOW_TWO_THIRDS, 1, DLSSNR_FLOW_AUTO };
+
 static std::wstring FlowDividerText(int divider)
 {
+	if (divider == DLSSNR_FLOW_TWO_THIRDS) {
+		return L"2/3";
+	}
 	return divider > 1 ? std::format(L"1/{}", divider) : std::wstring(divider ? L"Full" : L"Auto");
 }
 
 static int FlowDividerPos(int divider)
 {
-	return divider != DLSSNR_FLOW_AUTO ? DLSSNR_FLOW_MAX - divider : DLSSNR_FLOW_MAX;
+	for (int pos = 0; pos < (int)std::size(s_FlowNotches); pos++) {
+		if (s_FlowNotches[pos] == divider) {
+			return pos;
+		}
+	}
+	return (int)std::size(s_FlowNotches) - 1;   // Auto
 }
 
 static int FlowDividerAt(int pos)
 {
-	return pos < DLSSNR_FLOW_MAX ? DLSSNR_FLOW_MAX - pos : DLSSNR_FLOW_AUTO;
+	return s_FlowNotches[std::clamp(pos, 0, (int)std::size(s_FlowNotches) - 1)];
 }
 
 // DLSS 5 NR's working size, per cent of the picture's.
@@ -133,6 +146,7 @@ static const struct {
 	{ CVRSettingsPPage::SECTION_Detail,  IDD_SECTION_DETAIL,  L"Detail"       },
 	{ CVRSettingsPPage::SECTION_DlssNR,  IDD_SECTION_DLSSNR,  L"DLSS 5 NR"    },
 	{ CVRSettingsPPage::SECTION_Hdr,     IDD_SECTION_HDR,     L"HDR"          },
+	{ CVRSettingsPPage::SECTION_HdrCurve, IDD_SECTION_HDRCURVE, L"HDR curve"  },
 	{ CVRSettingsPPage::SECTION_Present, IDD_SECTION_PRESENT, L"Presentation" },
 	{ CVRSettingsPPage::SECTION_Presets, IDD_SECTION_PRESETS, L"Presets"      },
 };
@@ -288,9 +302,24 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 	{ IDC_CHECK28,
 		L"Also runs DLSS when the picture is already shown at its own size (for example a 4K film "
 		"on a 4K screen), to clean it without enlarging it. Games call this DLAA.\n"
+		"A picture that is shrunk (a 4K film on a 1440p screen) is first brought to the screen's "
+		"size by the Downscaling method, and DLSS then runs on it the same way.\n"
 		"Costs a full DLSS pass at the output size, which at 4K needs a high-end card: watch "
 		"'skipped' and the sync offset in the statistics.\n"
 		"Needs 'Use DLSS Super Resolution'." },
+	{ IDC_DLAA_AFTER,
+		L"Runs NVIDIA DLSS in its DLAA mode on the picture once it has been resized, whoever "
+		"resized it: the Upscaling or Downscaling method, an mpv prescaler, or the video processor "
+		"with or without RTX Video Super Resolution. It resizes nothing; it cleans the picture at "
+		"the size it is shown at.\n"
+		"GPU heavy: a full DLSS pass at the output size on every picture, which at 4K needs a "
+		"high-end card. Watch 'skipped' and the sync offset in the statistics.\n"
+		"One or the other with 'Use DLSS Super Resolution', which has its own DLAA. Uses its "
+		"preset and its DLL. Needs an NVIDIA RTX card, the 64-bit filter and Direct3D 11." },
+	{ IDC_DLAA_AFTER_NR,
+		L"Where DLSS 5 NR runs after the upscaling ('Apply after upscaling' on the DLSS 5 NR "
+		"tab), puts the DLAA after the network instead of before it.\n"
+		"Where the network runs before the upscaling, the DLAA comes after it anyway." },
 	{ IDC_COMBO15,
 		L"Which DLSS model runs. Automatic lets DLSS choose for the enlargement ratio." },
 	{ IDC_EDIT9,
@@ -386,7 +415,7 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"100 is recommended. 0 turns the stabilizer and the motion vectors off." },
 	{ IDC_SLIDER10,
 		L"Resolution at which NVIDIA Optical Flow measures motion for the stabilizer and the "
-		"network: 1/4, 1/3 or 1/2 of the working picture, or Full size.\n"
+		"network: 1/4, 1/3, 1/2 or 2/3 of the working picture, or Full size.\n"
 		"Lower is faster; higher follows fine motion more closely. Auto, the default, uses about "
 		"540 lines (half size for a 1080p film)." },
 	{ IDC_COMBO11,
@@ -452,7 +481,8 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"Available while a tone map method is chosen." },
 	{ IDC_EDIT_DISPLAYMAX,
 		L"Your display's real peak brightness in nits (100 to 10000), used by the tone mapping "
-		"methods.\n"
+		"methods, and by the HDR curve's presets (HDR curve tab, where the same value can be "
+		"set in passthrough).\n"
 		"Available while a tone mapping method is chosen." },
 	{ IDC_COMBO7,
 		L"Whether the filter may switch Windows HDR mode on by itself when HDR video (or RTX Video "
@@ -494,6 +524,69 @@ static const struct { int id; const wchar_t* text; } g_hints[] = {
 		"its highlights are not clipped meanwhile. A flash or a fast fade can be taken for a cut "
 		"too.\n"
 		"Available while one of the two is in use. Not carried by the presets." },
+
+	// HDR curve
+	{ IDC_HDRCURVE_ENABLE,
+		L"A curve on the light of every picture sent to the display in HDR: HDR10, HDR10+, Dolby "
+		"Vision, and SDR video turned into HDR by RTX Video HDR. It raises the shadows without "
+		"touching the highlights, moves the mid grey with the peak kept where it is, and softens "
+		"and caps the highlights. The three colours of a pixel get the same gain, so colours keep "
+		"their hue.\n"
+		"Applies last, after the tone mapping, before sharpening. Subtitles and the OSD are not "
+		"touched. With a peak cap, the HDR10 metadata sent to the display says the cap instead of "
+		"a higher peak of the film's, so that the display does not compress the highlights again.\n"
+		"Needs Direct3D 11 and HDR output. The curve and the presets come from Veyra." },
+	{ IDC_HDRCURVE_PRESET,
+		L"Ready-made curves, written for a 1000-nit display and scaled to the display's peak "
+		"below: where the highlights roll off and the cap follow it.\n"
+		"Dark lift: shadows raised, mid grey a little brighter.\n"
+		"Highlight guard: highlights softened from 450 nits, capped at 1000.\n"
+		"Dark and bright: both.\n"
+		"Bright room: shadows and mid grey raised for a lit room.\n"
+		"Dark room: a darker mid grey, highlights softened and capped at 800.\n"
+		"Punch: a darker mid grey, for more contrast, highlights softened.\n"
+		"Custom: the values on the right, as typed." },
+	{ IDC_HDRCURVE_NITS,
+		L"Your display's real peak brightness, in nits (100 to 10000): the same setting as Nits on "
+		"the HDR tab, which is greyed there in passthrough while the curve still uses it.\n"
+		"The presets' roll-off and cap follow it: written for 1000 nits, they are scaled by this "
+		"value over 1000. The shadows and the mid grey do not change with it." },
+	{ IDC_HDRCURVE_STRENGTH,
+		L"How much of the curve is applied: 0 % changes nothing, 100 % is the preset or the values "
+		"as they are, 200 % twice as much. The peak cap does not follow it." },
+	{ IDC_HDRCURVE_LIFT,
+		L"How much the shadows are raised, in hundredths of an exposure value: 100 doubles the "
+		"darkest parts. -200 to 200; negative darkens them. 0: no change." },
+	{ IDC_HDRCURVE_RANGE,
+		L"Up to how many nits the shadow lift reaches: it is strongest at black and fades out "
+		"here (1 to 100). Nothing brighter is touched by it." },
+	{ IDC_HDRCURVE_MIDGREY,
+		L"Where the mid grey goes, in nits: 203 (the HDR reference white) changes nothing, more "
+		"brightens the picture and less darkens it, the peak staying where it is (100 to 500)." },
+	{ IDC_HDRCURVE_START,
+		L"From how many nits the highlights are softened, instead of being clipped by the display "
+		"(100 to 2000). 0: no softening." },
+	{ IDC_HDRCURVE_ROLLOFF,
+		L"How soft the highlights' roll-off is: at 100 % the brightest highlights reach the peak "
+		"cap (or 1000 nits) and never pass it; more lets them come closer to it sooner, less "
+		"keeps them further under it (10 to 200)." },
+	{ IDC_HDRCURVE_CAP,
+		L"The brightest the picture may be, in nits (100 to 4000), with no colour above it. "
+		"0: no cap." },
+	{ IDC_HDRCURVE_TUNE_KEY,
+		L"A key that tunes the curve to the film playing, with what is held with it.\n"
+		"The film pauses, the picture goes to 16 places spread over it -- 30 s at most, usually "
+		"4 to 15 -- and comes back to the picture it was on, playing again if it was. At each "
+		"place the light the curve receives is measured, RTX Video HDR's included. The values "
+		"found bring the film towards real HDR masters: the shadows raised where they sit "
+		"deeper than a master's under the picture's average (one EV at most), the mid grey moved "
+		"only where the whole film is far darker or brighter than a master (half an EV at most), "
+		"and the highlights rolled off under the display's peak where they do not fit it.\n"
+		"They are kept as the Custom values, at 100 %, as a preset's key keeps its preset. "
+		"Pressed again during it, it stops and changes nothing. Needs HDR output.\n"
+		"Set the display's peak above first: the roll-off and the cap follow it." },
+	{ IDC_HDRCURVE_TUNE_MOD,
+		L"What is held with the tune's key: none, Ctrl, Shift, Alt or two of them." },
 
 	// Presentation
 	{ IDC_COMBO4,
@@ -690,12 +783,14 @@ HRESULT CVRSettingsPPage::OnDisconnect()
 		return E_UNEXPECTED;
 	}
 
-	if (m_SetsPP.iSDRDisplayNits != m_oldSDRDisplayNits || m_SetsPP.iVideoDelay != m_oldVideoDelay) {
-		// OK or Apply was not pressed, and the nits and the video delay apply as
-		// their sliders are dragged.
+	if (m_SetsPP.iSDRDisplayNits != m_oldSDRDisplayNits || m_SetsPP.iVideoDelay != m_oldVideoDelay
+			|| m_SetsPP.iHdrCurveStrength != m_oldHdrCurveStrength) {
+		// OK or Apply was not pressed, and the nits, the video delay and the HDR curve's
+		// strength apply as their sliders are dragged.
 		m_pVideoRenderer->GetSettings(m_SetsPP);
 		m_SetsPP.iSDRDisplayNits = m_oldSDRDisplayNits;
 		m_SetsPP.iVideoDelay = m_oldVideoDelay;
+		m_SetsPP.iHdrCurveStrength = m_oldHdrCurveStrength;
 		m_pVideoRenderer->SetSettings(m_SetsPP);
 	}
 
@@ -799,6 +894,21 @@ void CVRSettingsPPage::FillCombos()
 	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Metadata", SDRTM_Metadata);
 	Combo_AddData(Item(IDC_COMBO_SDRTM), L"Measured", SDRTM_Measured);
 
+	// Veyra's presets, and the values as typed.
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Dark lift",       HdrCurve::DarkLift);
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Highlight guard", HdrCurve::HighlightGuard);
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Dark and bright", HdrCurve::DarkAndBright);
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Bright room",     HdrCurve::BrightRoom);
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Dark room",       HdrCurve::DarkRoom);
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Punch",           HdrCurve::Punch);
+	Combo_AddData(Item(IDC_HDRCURVE_PRESET), L"Custom",          HdrCurve::Custom);
+	Send(IDC_HDRCURVE_STRENGTH, TBM_SETRANGE, 0, MAKELONG(HdrCurve::kStrengthMin, HdrCurve::kStrengthMax));
+	Send(IDC_HDRCURVE_STRENGTH, TBM_SETTIC, 0, HdrCurve::kStrengthDef);
+	// One per cent a key or a notch of the wheel, ten a click beside the thumb.
+	Send(IDC_HDRCURVE_STRENGTH, TBM_SETLINESIZE, 0, 1);
+	Send(IDC_HDRCURVE_STRENGTH, TBM_SETPAGESIZE, 0, 10);
+	FillTuneKeyCombos();
+
 	Combo_AddData(Item(IDC_DEBLOCK), L"Off",                     DEBLOCK_Off);
 	Combo_AddData(Item(IDC_DEBLOCK), L"PP7 (light)",             DEBLOCK_PP7);
 	Combo_AddData(Item(IDC_DEBLOCK), L"SPP (for a powerful GPU)", DEBLOCK_SPP);
@@ -866,7 +976,7 @@ void CVRSettingsPPage::FillCombos()
 	Send(IDC_SLIDER7, TBM_SETRANGE, 0, MAKELONG(DLSSNR_STAB_MIN, DLSSNR_STAB_MAX));
 	Send(IDC_SLIDER7, TBM_SETLINESIZE, 0, 1);
 	Send(IDC_SLIDER7, TBM_SETPAGESIZE, 0, 10);
-	// 4, 3, 2, Full and Auto from left to right (FlowDividerPos).
+	// 1/4, 1/3, 1/2, 2/3, Full and Auto from left to right (s_FlowNotches).
 	Send(IDC_SLIDER10, TBM_SETRANGE, 0, MAKELONG(0, FlowDividerPos(DLSSNR_FLOW_AUTO)));
 	Send(IDC_SLIDER10, TBM_SETLINESIZE, 0, 1);
 	Send(IDC_SLIDER10, TBM_SETPAGESIZE, 0, 1);
@@ -946,6 +1056,14 @@ void CVRSettingsPPage::SetControls()
 	m_SetsPP.iHdrDisplayMaxNits = discard<int>(m_SetsPP.iHdrDisplayMaxNits, HDR_NITS_DEF, HDR_NITS_MIN, HDR_NITS_MAX);
 	SetText(IDC_EDIT_DISPLAYMAX, std::to_wstring(m_SetsPP.iHdrDisplayMaxNits).c_str());
 
+	SetCheck(IDC_HDRCURVE_ENABLE, m_SetsPP.bHdrCurve);
+	Combo_SelectData(Item(IDC_HDRCURVE_PRESET), m_SetsPP.iHdrCurvePreset);
+	Send(IDC_HDRCURVE_STRENGTH, TBM_SETPOS, TRUE, m_SetsPP.iHdrCurveStrength);
+	SetText(IDC_HDRCURVE_STRENGTH_TEXT, std::format(L"{} %", m_SetsPP.iHdrCurveStrength).c_str());
+	ShowHdrCurveValues();
+	Combo_SelectData(Item(IDC_HDRCURVE_TUNE_KEY), m_SetsPP.iHdrCurveTuneKey & 0xFF);
+	Combo_SelectData(Item(IDC_HDRCURVE_TUNE_MOD), m_SetsPP.iHdrCurveTuneKey & ~0xFF);
+
 	Send(IDC_COMBO4, CB_SETCURSEL, m_SetsPP.iSwapEffect, 0);
 	SetCheck(IDC_CHECK11, m_SetsPP.bExclusiveFS);
 	SetCheck(IDC_CHECK15, m_SetsPP.bVBlankBeforePresent);
@@ -987,6 +1105,8 @@ void CVRSettingsPPage::SetControls()
 	SetCheck(IDC_CHECK28, m_SetsPP.bDlssSRDlaa);
 	Combo_SelectData(Item(IDC_COMBO15), m_SetsPP.iDlssSRPreset);
 	SetText(IDC_EDIT9, m_SetsPP.szDlssSRDllPath);
+	SetCheck(IDC_DLAA_AFTER, m_SetsPP.bDlaaAfterScaling);
+	SetCheck(IDC_DLAA_AFTER_NR, m_SetsPP.bDlaaAfterNR);
 }
 
 void CVRSettingsPPage::EnableControls()
@@ -1121,12 +1241,52 @@ void CVRSettingsPPage::EnableControls()
 	}
 
 	// DLSS Super Resolution does not depend on DLSS 5 NR: another DLL, another session.
-	for (const int id : { IDC_CHECK25, IDC_STATIC35, IDC_STATIC37, IDC_EDIT9, IDC_BUTTON4 }) {
+	// It and the DLAA after scaling are one or the other (Greying.h).
+	for (const int id : { IDC_STATIC35, IDC_STATIC37, IDC_EDIT9, IDC_BUTTON4 }) {
 		Enable(id, bD3D11);
 	}
-	for (const int id : { IDC_STATIC36, IDC_COMBO15, IDC_CHECK28, IDC_STATIC_DLAA_NOTE }) {
-		Enable(id, bD3D11 && m_SetsPP.bDlssSR);
+	Enable(IDC_CHECK25, grey.bDlssSRBox);
+	for (const int id : { IDC_CHECK28, IDC_STATIC_DLAA_NOTE }) {
+		Enable(id, grey.bDlssSRDlaaBox);
 	}
+	for (const int id : { IDC_STATIC36, IDC_COMBO15 }) {
+		Enable(id, grey.bDlssPresetList);
+	}
+	Enable(IDC_DLAA_AFTER_GROUP, bD3D11);
+	Enable(IDC_DLAA_AFTER, grey.bDlaaAfterBox);
+	Enable(IDC_STATIC_DLAA_AFTER_NOTE, grey.bDlaaAfterBox);
+	Enable(IDC_DLAA_AFTER_NR, grey.bDlaaAfterNRBox);
+
+	// The HDR curve (Greying.h): its box with Direct3D 11 on Windows 10, the rest with the box.
+	// The display's peak is the HDR tab's Nits, greyed there in passthrough, where the curve
+	// still uses it: here it follows the curve's box.
+	Enable(IDC_HDRCURVE_ENABLE, grey.bHdrCurveBox);
+	for (const int id : { IDC_STATIC_HDRCURVE_PRESET, IDC_HDRCURVE_PRESET, IDC_STATIC_HDRCURVE_STRENGTH,
+			IDC_HDRCURVE_STRENGTH, IDC_HDRCURVE_STRENGTH_TEXT, IDC_STATIC_HDRCURVE_NITS, IDC_HDRCURVE_NITS, IDC_CARD_HDRCURVE_VALUES,
+			IDC_STATIC_HDRCURVE_LIFT, IDC_HDRCURVE_LIFT, IDC_STATIC_HDRCURVE_RANGE, IDC_HDRCURVE_RANGE,
+			IDC_STATIC_HDRCURVE_MIDGREY, IDC_HDRCURVE_MIDGREY, IDC_STATIC_HDRCURVE_START, IDC_HDRCURVE_START,
+			IDC_STATIC_HDRCURVE_ROLLOFF, IDC_HDRCURVE_ROLLOFF, IDC_STATIC_HDRCURVE_CAP, IDC_HDRCURVE_CAP }) {
+		Enable(id, grey.bHdrCurveValues);
+	}
+	// The tune switches the curve on itself: its key follows the curve's box, not its tick.
+	for (const int id : { IDC_CARD_HDRCURVE_TUNE, IDC_STATIC_HDRCURVE_TUNEKEY, IDC_HDRCURVE_TUNE_MOD, IDC_HDRCURVE_TUNE_KEY,
+			IDC_STATIC_HDRCURVE_TUNE_NOTE }) {
+		Enable(id, grey.bHdrCurveBox);
+	}
+}
+
+void CVRSettingsPPage::ShowHdrCurveValues()
+{
+	const HdrCurve::Values v = HdrCurve::BaseValues(m_SetsPP.iHdrCurvePreset, HdrCurve::ValuesOf(m_SetsPP),
+		m_SetsPP.iHdrDisplayMaxNits);
+	m_bFillingCurve = true;
+	SetText(IDC_HDRCURVE_LIFT,    std::to_wstring(v.liftEv100).c_str());
+	SetText(IDC_HDRCURVE_RANGE,   std::to_wstring(v.rangeNits).c_str());
+	SetText(IDC_HDRCURVE_MIDGREY, std::to_wstring(v.midGreyNits).c_str());
+	SetText(IDC_HDRCURVE_START,   std::to_wstring(v.startNits).c_str());
+	SetText(IDC_HDRCURVE_ROLLOFF, std::to_wstring(v.rollOffPercent).c_str());
+	SetText(IDC_HDRCURVE_CAP,     std::to_wstring(v.capNits).c_str());
+	m_bFillingCurve = false;
 }
 
 HRESULT CVRSettingsPPage::OnActivate()
@@ -1137,7 +1297,9 @@ HRESULT CVRSettingsPPage::OnActivate()
 	m_pVideoRenderer->GetSettings(m_SetsPP);
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
 	m_oldVideoDelay = m_SetsPP.iVideoDelay;
+	m_oldHdrCurveStrength = m_SetsPP.iHdrCurveStrength;
 	m_bDlssNRSeen = m_SetsPP.bDlssNR;
+	SeeCurve(m_SetsPP);
 	m_bDoViByShaders = (m_pVideoRenderer->GetVideoProcessorUse() & VPUSE_DoViByShaders) != 0;
 
 	HWND hTabs = ::GetDlgItem(m_hwnd, IDC_SECTION_TABS);
@@ -1307,12 +1469,28 @@ INT_PTR CVRSettingsPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, 
 		// Only a change the page did not make is the toggle key's: comparing against
 		// what the page holds would undo a tick that has not been applied yet.
 		const bool bToggled = (current.bDlssNR != m_bDlssNRSeen);
-		if (bToggled || bDoVi != m_bDoViByShaders || uMsg == WM_SHOWWINDOW) {
+		// The HDR curve's tune key sets the curve while the page is open: what it found is
+		// shown, and an Apply or a Cancel no longer puts the page's older copy back over it.
+		const bool bTuned = !SameCurve(current, m_curveSeen);
+		if (bToggled || bTuned || bDoVi != m_bDoViByShaders || uMsg == WM_SHOWWINDOW) {
 			m_bDoViByShaders = bDoVi;
 			if (bToggled) {
 				m_bDlssNRSeen = current.bDlssNR;
 				m_SetsPP.bDlssNR = current.bDlssNR;
 				SetCheck(IDC_DLSSNR_ENABLE, m_SetsPP.bDlssNR);
+			}
+			if (bTuned) {
+				SeeCurve(current);
+				m_SetsPP.bHdrCurve = current.bHdrCurve;
+				m_SetsPP.iHdrCurvePreset = current.iHdrCurvePreset;
+				m_SetsPP.iHdrCurveStrength = current.iHdrCurveStrength;
+				m_oldHdrCurveStrength = current.iHdrCurveStrength;
+				HdrCurve::StoreValues(m_SetsPP, HdrCurve::ValuesOf(current));
+				SetCheck(IDC_HDRCURVE_ENABLE, m_SetsPP.bHdrCurve);
+				Combo_SelectData(Item(IDC_HDRCURVE_PRESET), m_SetsPP.iHdrCurvePreset);
+				Send(IDC_HDRCURVE_STRENGTH, TBM_SETPOS, TRUE, m_SetsPP.iHdrCurveStrength);
+				SetText(IDC_HDRCURVE_STRENGTH_TEXT, std::format(L"{} %", m_SetsPP.iHdrCurveStrength).c_str());
+				ShowHdrCurveValues();
 			}
 			EnableControls();
 		}
@@ -1331,6 +1509,7 @@ INT_PTR CVRSettingsPPage::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, 
 			// in its own section -- the same split the two old pages had.
 			Settings_t defaults;
 			CopyDlssSettings(defaults, m_SetsPP);
+			defaults.iHdrCurveTuneKey = m_SetsPP.iHdrCurveTuneKey; // a key, as the toggle's is kept
 			m_SetsPP = defaults;
 			SetControls();
 			EnableControls();
@@ -1426,9 +1605,12 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				{ IDC_SDR_PEAK_CUTS, &m_SetsPP.bSdrPeakSceneCuts, false },
 				{ IDC_DLSSNR_ENABLE, &m_SetsPP.bDlssNR,        true  },
 				{ IDC_CHECK21, &m_SetsPP.bDlssNRAutoMask,      false },
-				{ IDC_CHECK23, &m_SetsPP.bDlssNRAfterUpscale,  false },
+				{ IDC_CHECK23, &m_SetsPP.bDlssNRAfterUpscale,  true  },   // the DLAA's order follows it
 				{ IDC_CHECK25, &m_SetsPP.bDlssSR,              true  },
 				{ IDC_CHECK28, &m_SetsPP.bDlssSRDlaa,          false },
+				{ IDC_DLAA_AFTER, &m_SetsPP.bDlaaAfterScaling, true  },
+				{ IDC_DLAA_AFTER_NR, &m_SetsPP.bDlaaAfterNR,   false },
+				{ IDC_HDRCURVE_ENABLE, &m_SetsPP.bHdrCurve,    true  },
 				{ IDC_CHECK29, &m_SetsPP.bUpscalingSmall,      true  },
 				{ IDC_CHECK26, &m_SetsPP.bDlssRenderAhead,     true  },
 				{ IDC_CHECK27, &m_SetsPP.bVPReplaceChroma,     true  },
@@ -1478,6 +1660,7 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				defaults.iDlssNRToggleKey = m_SetsPP.iDlssNRToggleKey;
 				wcscpy_s(defaults.szDlssNRDllPath, m_SetsPP.szDlssNRDllPath);
 				defaults.bDlssSR = m_SetsPP.bDlssSR;
+				defaults.bDlaaAfterScaling = m_SetsPP.bDlaaAfterScaling;
 				wcscpy_s(defaults.szDlssSRDllPath, m_SetsPP.szDlssSRDllPath);
 				// Nor is the working size: it is what the card can carry.
 				defaults.iDlssNRWorkingScale = m_SetsPP.iDlssNRWorkingScale;
@@ -1490,9 +1673,66 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 		}
 
 		if (action == EN_CHANGE) {
-			if (nID == IDC_EDIT_DISPLAYMAX) {
-				SetDirty();
+			// The display's peak, in two boxes for the one setting: the HDR tab's Nits and the
+			// HDR curve's, each written into the other. Kept as it is typed while it is within
+			// its range, so that a preset's values follow it at once; read again on Apply.
+			if (nID == IDC_EDIT_DISPLAYMAX || nID == IDC_HDRCURVE_NITS) {
+				if (!m_bSyncingNits) {
+					wchar_t text[16] = {};
+					if (HWND h = Item(nID)) {
+						::GetWindowTextW(h, text, (int)std::size(text));
+					}
+					m_bSyncingNits = true;
+					SetText(nID == IDC_EDIT_DISPLAYMAX ? IDC_HDRCURVE_NITS : IDC_EDIT_DISPLAYMAX, text);
+					m_bSyncingNits = false;
+					const int nits = _wtoi(text);
+					if (nits >= HDR_NITS_MIN && nits <= HDR_NITS_MAX && nits != m_SetsPP.iHdrDisplayMaxNits) {
+						m_SetsPP.iHdrDisplayMaxNits = nits;
+						ShowHdrCurveValues();
+					}
+					SetDirty();
+				}
 				return (INT_PTR)1;
+			}
+			// The HDR curve's values, kept as they are typed while they are within their
+			// range (a roll-off's start and a cap may also be 0, none). Typing one makes the
+			// preset Custom, the others staying as the preset had them on this display.
+			{
+				using HdrCurve::Values;
+				const struct { int id; int lo, hi; bool bZero; int Values::* field; } curveValues[] = {
+					{ IDC_HDRCURVE_LIFT,    HdrCurve::kLiftMin,  HdrCurve::kLiftMax,  false, &Values::liftEv100      },
+					{ IDC_HDRCURVE_RANGE,   HdrCurve::kRangeMin, HdrCurve::kRangeMax, false, &Values::rangeNits      },
+					{ IDC_HDRCURVE_MIDGREY, HdrCurve::kMidMin,   HdrCurve::kMidMax,   false, &Values::midGreyNits    },
+					{ IDC_HDRCURVE_START,   HdrCurve::kStartMin, HdrCurve::kStartMax, true,  &Values::startNits      },
+					{ IDC_HDRCURVE_ROLLOFF, HdrCurve::kRollMin,  HdrCurve::kRollMax,  false, &Values::rollOffPercent },
+					{ IDC_HDRCURVE_CAP,     HdrCurve::kCapMin,   HdrCurve::kCapMax,   true,  &Values::capNits        },
+				};
+				for (const auto& c : curveValues) {
+					if (nID != c.id) {
+						continue;
+					}
+					if (m_bFillingCurve) {
+						return (INT_PTR)1;
+					}
+					wchar_t text[16] = {};
+					if (HWND h = Item(nID)) {
+						::GetWindowTextW(h, text, (int)std::size(text));
+					}
+					wchar_t* end = nullptr;
+					const long value = wcstol(text, &end, 10);
+					if (end != text && *end == L'\0' && ((value >= c.lo && value <= c.hi) || (c.bZero && value == 0))) {
+						Values v = HdrCurve::BaseValues(m_SetsPP.iHdrCurvePreset, HdrCurve::ValuesOf(m_SetsPP),
+							m_SetsPP.iHdrDisplayMaxNits);
+						v.*c.field = (int)value;
+						HdrCurve::StoreValues(m_SetsPP, v);
+						if (m_SetsPP.iHdrCurvePreset != HdrCurve::Custom) {
+							m_SetsPP.iHdrCurvePreset = HdrCurve::Custom;
+							Combo_SelectData(Item(IDC_HDRCURVE_PRESET), HdrCurve::Custom);
+						}
+						SetDirty();
+					}
+					return (INT_PTR)1;
+				}
 			}
 			if (nID == IDC_EDIT7 || nID == IDC_EDIT9) {
 				// SetControls fills the box too; only a real edit makes it dirty.
@@ -1534,6 +1774,37 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				}
 			}
 
+			// The HDR curve's tune key: one key, one job, as a preset's. The DLSS toggle takes
+			// its key whatever is held with it, so the bare key is all it needs to clash.
+			if (nID == IDC_HDRCURVE_TUNE_KEY || nID == IDC_HDRCURVE_TUNE_MOD) {
+				const int key = TuneKeyShown();
+				std::wstring taken;
+				if (key && (key & 0xFF) == m_SetsPP.iDlssNRToggleKey) {
+					taken = L"the DLSS 5 NR toggle";
+				}
+				for (int slot = 0; key && slot < PRESET_COUNT; slot++) {
+					if (PresetKeyShown(slot) == key) {
+						taken = std::format(L"preset {}", slot + 1);
+					}
+				}
+				if (!taken.empty()) {
+					MessageBoxW(std::format(L"This shortcut is already used by {}.", taken).c_str(), L"HDR curve", MB_OK | MB_ICONINFORMATION);
+					Combo_SelectData(Item(IDC_HDRCURVE_TUNE_KEY), 0);
+				}
+				if (TuneKeyShown() != m_SetsPP.iHdrCurveTuneKey) {
+					m_SetsPP.iHdrCurveTuneKey = TuneKeyShown();
+					SetDirty();
+				}
+				return (INT_PTR)1;
+			}
+			if (nID == IDC_COMBO13) {
+				const int vk = (int)Combo_CurData(Item(IDC_COMBO13));
+				if (vk && vk == (TuneKeyShown() & 0xFF)) {
+					MessageBoxW(L"This key is already used by the HDR curve's tune.", L"DLSS 5 NR", MB_OK | MB_ICONINFORMATION);
+					Combo_SelectData(Item(IDC_COMBO13), 0);
+				}
+			}
+
 			// Lists that carry their value as item data, so they can be ordered freely.
 			const struct { int id; int* pValue; bool bEnables; } byData[] = {
 				{ IDC_COMBO2,  &m_SetsPP.iUpscaling,       false },
@@ -1560,6 +1831,22 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 					}
 					return (INT_PTR)1;
 				}
+			}
+
+			// A preset shows its values on this display; Custom keeps those the list showed,
+			// to be edited from there.
+			if (nID == IDC_HDRCURVE_PRESET) {
+				const int value = (int)Combo_CurData(Item(IDC_HDRCURVE_PRESET));
+				if (value != m_SetsPP.iHdrCurvePreset && value >= HdrCurve::Custom && value < HdrCurve::PresetCount) {
+					if (value == HdrCurve::Custom) {
+						HdrCurve::StoreValues(m_SetsPP, HdrCurve::BaseValues(m_SetsPP.iHdrCurvePreset,
+							HdrCurve::ValuesOf(m_SetsPP), m_SetsPP.iHdrDisplayMaxNits));
+					}
+					m_SetsPP.iHdrCurvePreset = value;
+					ShowHdrCurveValues();
+					SetDirty();
+				}
+				return (INT_PTR)1;
 			}
 
 			if (nID == IDC_COMBO1) {
@@ -1648,6 +1935,22 @@ INT_PTR CVRSettingsPPage::OnSectionMessage(HWND hDlg, UINT uMsg, WPARAM wParam, 
 				m_pVideoRenderer->GetSettings(sets);
 				sets.iSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
 				m_pVideoRenderer->SetSettings(sets);
+			}
+			return (INT_PTR)1;
+		}
+		if (hCtrl == Item(IDC_HDRCURVE_STRENGTH)) {
+			const int value = (int)Send(IDC_HDRCURVE_STRENGTH, TBM_GETPOS);
+			if (value != m_SetsPP.iHdrCurveStrength) {
+				m_SetsPP.iHdrCurveStrength = value;
+				SetText(IDC_HDRCURVE_STRENGTH_TEXT, std::format(L"{} %", value).c_str());
+				SetDirty();
+				// Applied as it is dragged, so that it is judged on the picture: the strength
+				// alone, on the curve the renderer has.
+				Settings_t sets;
+				m_pVideoRenderer->GetSettings(sets);
+				sets.iHdrCurveStrength = m_SetsPP.iHdrCurveStrength;
+				m_pVideoRenderer->SetSettings(sets);
+				m_curveSeen.iHdrCurveStrength = sets.iHdrCurveStrength; // the page's change, not a tune's
 			}
 			return (INT_PTR)1;
 		}
@@ -1752,6 +2055,37 @@ int CVRSettingsPPage::PresetKeyShown(int slot)
 {
 	const int vk = (int)Combo_CurData(Item(IDC_PRESET_KEY1 + slot));
 	return vk ? (vk | (int)Combo_CurData(Item(IDC_PRESET_MOD1 + slot))) : 0;
+}
+
+// The HDR curve's tune key takes the presets' keys and what may be held with them.
+void CVRSettingsPPage::FillTuneKeyCombos()
+{
+	for (const auto& k : g_presetKeys) {
+		Combo_AddData(Item(IDC_HDRCURVE_TUNE_KEY), k.name, k.vk);
+	}
+	for (const auto& h : g_presetHeld) {
+		Combo_AddData(Item(IDC_HDRCURVE_TUNE_MOD), h.name, h.held);
+	}
+}
+
+int CVRSettingsPPage::TuneKeyShown()
+{
+	const int vk = (int)Combo_CurData(Item(IDC_HDRCURVE_TUNE_KEY));
+	return vk ? (vk | (int)Combo_CurData(Item(IDC_HDRCURVE_TUNE_MOD))) : 0;
+}
+
+bool CVRSettingsPPage::SameCurve(const Settings_t& a, const Settings_t& b)
+{
+	return a.bHdrCurve == b.bHdrCurve && a.iHdrCurvePreset == b.iHdrCurvePreset && a.iHdrCurveStrength == b.iHdrCurveStrength
+		&& HdrCurve::ValuesOf(a) == HdrCurve::ValuesOf(b);
+}
+
+void CVRSettingsPPage::SeeCurve(const Settings_t& from)
+{
+	m_curveSeen.bHdrCurve = from.bHdrCurve;
+	m_curveSeen.iHdrCurvePreset = from.iHdrCurvePreset;
+	m_curveSeen.iHdrCurveStrength = from.iHdrCurveStrength;
+	HdrCurve::StoreValues(m_curveSeen, HdrCurve::ValuesOf(from));
 }
 
 void CVRSettingsPPage::ShowLogoStatus()
@@ -1902,6 +2236,9 @@ bool CVRSettingsPPage::OnPresetCommand(int nID, int action)
 		if (key && key == m_SetsPP.iDlssNRToggleKey) {
 			taken = L"the DLSS 5 NR toggle";
 		}
+		if (key && key == TuneKeyShown()) {
+			taken = L"the HDR curve's tune";
+		}
 		for (int other = 0; key && other < PRESET_COUNT; other++) {
 			if (other != slot && PresetKeyShown(other) == key) {
 				taken = std::format(L"preset {}", other + 1);
@@ -1982,7 +2319,7 @@ HRESULT CVRSettingsPPage::OnApplyChanges()
 	}
 	// Both ends are allowed, as the message says and as the registry reads it back.
 	if (!translated || displayMaxNits < HDR_NITS_MIN || displayMaxNits > HDR_NITS_MAX) {
-		MessageBoxW(L"Invalid display peak brightness (HDR tab): enter a number of nits from 100 to 10000.", L"MPCVR-Plus",
+		MessageBoxW(L"Invalid display peak brightness (HDR tab, or HDR curve tab): enter a number of nits from 100 to 10000.", L"MPCVR-Plus",
 			MB_OK | MB_ICONERROR);
 	}
 	else {
@@ -2003,8 +2340,11 @@ HRESULT CVRSettingsPPage::OnApplyChanges()
 
 	m_oldSDRDisplayNits = m_SetsPP.iSDRDisplayNits;
 	m_oldVideoDelay = m_SetsPP.iVideoDelay;
+	m_oldHdrCurveStrength = m_SetsPP.iHdrCurveStrength;
 	m_bDlssNRSeen = m_SetsPP.bDlssNR;
+	SeeCurve(m_SetsPP);
 
+	ShowHdrCurveValues(); // a value typed out of its range shows the one kept
 	EnableControls(); // what was just applied decides part of the greying
 
 	// And whether the DLSS sessions came up with it.

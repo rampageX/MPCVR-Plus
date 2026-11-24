@@ -1011,6 +1011,8 @@ static int RunOracle(ID3D11Device* dev, ID3D11DeviceContext* ctx, CDlssNR& dlss,
 #include "downscale_port_suite.inl"
 #include "downscale_quality_suite.inl"
 #include "dither_suite.inl"
+#include "hdrcurve_suite.inl"
+#include "hdrtune_suite.inl"
 #include "tonemap_suite.inl"
 #include "sr_suite.inl"
 #include "sr_still_suite.inl"
@@ -1119,6 +1121,8 @@ int wmain(int argc, wchar_t** argv)
 	const bool temporalDownscale = hasArg(L"--tdownscale");
 	const bool temporalDither = hasArg(L"--tdither");
 	const bool temporalToneMap = hasArg(L"--ttonemap");
+	const bool temporalHdrCurve = hasArg(L"--thdrcurve");
+	const bool temporalHdrTune = hasArg(L"--thdrtune");
 	std::wstring mpvExtra;   // --mpvextra <dir>: more translated mpv shaders for --tupscale and --tdownscale
 	for (int i = 1; i + 1 < argc; i++) {
 		if (!wcscmp(argv[i], L"--mpvextra")) {
@@ -1196,10 +1200,10 @@ int wmain(int argc, wchar_t** argv)
 			srClipWhich = argv[i + 1];
 		}
 	}
-	int nrFlowFactor = 0;   // --nrflow N: --tnrscale with Optical Flow at N working pixels per flow pixel
+	float nrFlowFactor = 0;   // --nrflow N: --tnrscale with Optical Flow at N working pixels per flow pixel (1.5: 2/3)
 	for (int i = 1; i + 1 < argc; i++) {
 		if (!wcscmp(argv[i], L"--nrflow")) {
-			nrFlowFactor = std::clamp(_wtoi(argv[i + 1]), 0, 4);
+			nrFlowFactor = std::clamp((float)_wtof(argv[i + 1]), 0.0f, 4.0f);
 		}
 	}
 	std::wstring srDllPath;   // empty: CDlssSR looks next to the harness, then up to the repository root
@@ -1219,7 +1223,7 @@ int wmain(int argc, wchar_t** argv)
 	// stabilizer's port check never ran in it. Two named is refused, out loud.
 	const bool suites[] = { temporal, temporalOracle, temporalEffect, temporalFlow, temporalStab || temporalStabPort,
 		temporalStabBench, temporalUpscale, temporalUpscaleCost, temporalChroma, temporalSharpen, temporalClean, temporalMpvPort,
-		temporalDownPort, temporalDownscale, temporalDither, temporalToneMap, temporalSR, temporalSRQuality, temporalSRStill, temporalSRPort,
+		temporalDownPort, temporalDownscale, temporalDither, temporalToneMap, temporalHdrCurve, temporalHdrTune, temporalSR, temporalSRQuality, temporalSRStill, temporalSRPort,
 		temporalPipeline, temporalNRScale, temporalSRClip, temporalSRCut, temporalCutScan, temporalAutoMask, temporalLogo,
 		temporalCadence, temporalCadenceCut, temporalCadenceMade, temporalEchoPerf };
 	if (std::count(std::begin(suites), std::end(suites), true) > 1) {
@@ -1231,7 +1235,7 @@ int wmain(int argc, wchar_t** argv)
 		return 4;
 	}
 	if (temporal || temporalOracle || temporalEffect || temporalFlow
-			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalChroma || temporalSharpen || temporalClean || temporalMpvPort || temporalDownPort || temporalDownscale || temporalDither || temporalToneMap || temporalSR || temporalSRQuality || temporalSRStill || temporalSRPort || temporalPipeline || temporalNRScale || temporalSRClip || temporalSRCut || temporalCutScan || temporalAutoMask || temporalLogo
+			|| temporalStab || temporalStabPort || temporalStabBench || temporalUpscale || temporalUpscaleCost || temporalChroma || temporalSharpen || temporalClean || temporalMpvPort || temporalDownPort || temporalDownscale || temporalDither || temporalToneMap || temporalHdrCurve || temporalHdrTune || temporalSR || temporalSRQuality || temporalSRStill || temporalSRPort || temporalPipeline || temporalNRScale || temporalSRClip || temporalSRCut || temporalCutScan || temporalAutoMask || temporalLogo
 			|| temporalCadence || temporalCadenceCut || temporalCadenceMade || temporalEchoPerf) {
 		int srRefs = 0;   // --srrefs N: only the first N references
 		for (int i = 1; i + 1 < argc; i++) {
@@ -1259,6 +1263,8 @@ int wmain(int argc, wchar_t** argv)
 			: temporalDownscale ? temporal::RunDownscaleQuality(dev, ctx, mpvExtra.c_str())
 			: temporalDither ? temporal::RunDither(dev, ctx, hasArg(L"--study"))
 			: temporalToneMap ? temporal::RunToneMap(dev, ctx)
+			: temporalHdrCurve ? temporal::RunHdrCurve(dev, ctx)
+			: temporalHdrTune ? temporal::RunHdrTune(dev, ctx)
 			: temporalDownPort ? temporal::RunDownscalePort(dev, ctx)
 			: temporalUpscaleCost ? temporal::RunUpscaleCost(dev, ctx)
 			: temporalMpvPort ? temporal::RunMpvPort(dev, ctx, srRefs)

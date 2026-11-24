@@ -287,7 +287,7 @@ void CDX11VideoProcessor::ReleaseDlssNRTextures(const bool bFeature)
 
 std::wstring CDX11VideoProcessor::GetDlssSRStatus()
 {
-	if (!m_bDlssSR) {
+	if (!m_bDlssSR && !m_bDlaaAfterScaling) {
 		return {};
 	}
 	if (!DlssSRSupportedHere()) {
@@ -309,21 +309,33 @@ bool CDX11VideoProcessor::DlssSRSupportedHere() const
 #endif
 }
 
-// Load or drop the DLSS Super Resolution session to match the setting. Toggling
-// only drops the feature; the session goes with the device or another DLL.
+// Load or drop the DLSS Super Resolution session to match the settings: DLSS Super
+// Resolution, or the DLAA after scaling, which uses the same session and gives way to
+// it. Toggling only drops the feature; the session goes with the device or another DLL.
 void CDX11VideoProcessor::UpdateDlssSR()
 {
-	if (!m_bDlssSR || !DlssSRSupportedHere()) {
+	if (!(m_bDlssSR || m_bDlaaAfterScaling) || !DlssSRSupportedHere()) {
 		m_DlssSR.ReleaseFeature();
 		m_DlssSRMotion.Release();
 		m_strDlssSRMotion.clear();
 		m_bDlssSRActive = false;
+		m_bDlaaAfterActive = false;
 		return;
 	}
 	if (!m_DlssSR.IsInitialised()) {
 		m_DlssSR.Init(m_pDevice, m_strDlssSRDllPath.c_str());
 	}
-	m_bDlssSRActive = m_DlssSR.IsInitialised();
+	const bool bReady = m_DlssSR.IsInitialised();
+	m_bDlssSRActive = m_bDlssSR && bReady;
+	m_bDlaaAfterActive = !m_bDlssSR && m_bDlaaAfterScaling && bReady;
+}
+
+// The DLAA after scaling is one of the steps after the resizing, counted whenever it is
+// asked for where it can run, so that the post-scale textures do not change with whether
+// a picture got through: a step that does not run copies the picture through.
+bool CDX11VideoProcessor::DlaaAfterStepCounted() const
+{
+	return m_bDlaaAfterScaling && !m_bDlssSR && DlssSRSupportedHere();
 }
 
 HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSrc, const CRect& dstRect, const int rotation, Tex2D_t** ppResult)
@@ -342,11 +354,19 @@ HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	// already asks NGX for NGX_PERFQUALITY_DLAA at a ratio of one; what was missing
 	// was letting the pass get that far.
 	const bool bDlaa = m_bDlssSRDlaa && outW == inW && outH == inH;
-	if (!inW || !inH || (!bDlaa && (outW <= inW || outH <= inH))) {
+	// And DLAA after the downscalers: a picture that shrinks -- a 4K film on a 1440p screen --
+	// is first brought to the screen's size by the Downscaling method, which resizes it as it
+	// did, and DLSS runs on that at a ratio of one. DLSS only cleans here; it resizes nothing.
+	// A picture that grows one way and shrinks the other is left as it was.
+	const bool bDlaaDown = m_bDlssSRDlaa && !bDlaa && outW <= inW && outH <= inH;
+	if (!inW || !inH || (!bDlaa && !bDlaaDown && (outW <= inW || outH <= inH))) {
 		return S_FALSE;   // DLSS enlarges, or holds the size; the downscalers do the rest
 	}
+	// The size DLSS takes: the source's, or the screen's once the downscalers have run.
+	const UINT featW = bDlaaDown ? outW : inW;
+	const UINT featH = bDlaaDown ? outH : inH;
 
-	if (!bDlaa) {
+	if (!bDlaa && !bDlaaDown) {
 		// Past four times the source the output stops there, and the resize shaders
 		// cover what is left (measured: 4.5x still runs, but nothing films need).
 		const double reach = std::min({ 4.0 * inW / outW, 4.0 * inH / outH, 7680.0 / outW, 4320.0 / outH, 1.0 });
@@ -355,11 +375,11 @@ HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	}
 
 	const unsigned preset = (unsigned)m_iDlssSRPreset;
-	if (!m_DlssSR.MatchesFeature(inW, inH, outW, outH, preset)) {
-		if (m_DlssSR.IsRefused(inW, inH, outW, outH, preset)) {
+	if (!m_DlssSR.MatchesFeature(featW, featH, outW, outH, preset)) {
+		if (m_DlssSR.IsRefused(featW, featH, outW, outH, preset)) {
 			return S_FALSE;   // failed before for these sizes: the resize shaders do the job
 		}
-		if (!m_DlssSR.CreateFeature(inW, inH, outW, outH, preset)) {
+		if (!m_DlssSR.CreateFeature(featW, featH, outW, outH, preset)) {
 			UpdateStatsStatic();
 			return S_FALSE;
 		}
@@ -370,10 +390,66 @@ HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	}
 
 	Tex2D_t* pInput = m_DlssSR.GetInput();
-	HRESULT hr = TextureCopyRect(*pInputTexture, pInput->pTexture, rSrc, CRect(0, 0, inW, inH), m_pPS_Simple, nullptr, 0, false);
+	HRESULT hr = S_OK;
+	if (bDlaaDown) {
+		// Into DLSS's input at the screen's size, turned and flipped by nothing: the
+		// ResizeShaderPass after DLSS does both, at a ratio of one.
+		const bool bFlip = m_bFlip;
+		m_bFlip = false;
+		m_DlssStageTimes.Begin(m_pDeviceContext, CGpuStageTimes::SRDownscale);
+		hr = ResizeShaderPass(*pInputTexture, pInput->pTexture, rSrc, CRect(0, 0, featW, featH), 0);
+		m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::SRDownscale);
+		m_bFlip = bFlip;
+	} else {
+		hr = TextureCopyRect(*pInputTexture, pInput->pTexture, rSrc, CRect(0, 0, inW, inH), m_pPS_Simple, nullptr, 0, false);
+	}
 	if (FAILED(hr)) {
 		return hr;
 	}
+	return DlssSRRun(featW, featH, ppResult);
+}
+
+// DLAA after the resizing, whoever resized: the picture at the size it is shown at, rect
+// of the post-scale texture, run through DLSS at a ratio of one. DLSS Super Resolution
+// is off for this to run (DlaaAfterStepCounted), so the two share its session, its
+// feature and its motion.
+HRESULT CDX11VideoProcessor::DlaaAfterScalingPass(Tex2D_t* pInputTexture, const CRect& rect, Tex2D_t** ppResult)
+{
+	if (!pInputTexture || !ppResult) {
+		return E_POINTER;
+	}
+	const UINT w = rect.Width(), h = rect.Height();
+	if (!w || !h) {
+		return S_FALSE;
+	}
+
+	const unsigned preset = (unsigned)m_iDlssSRPreset;
+	if (!m_DlssSR.MatchesFeature(w, h, w, h, preset)) {
+		if (m_DlssSR.IsRefused(w, h, w, h, preset)) {
+			return S_FALSE;   // failed before for this size: the picture goes on as it is
+		}
+		if (!m_DlssSR.CreateFeature(w, h, w, h, preset)) {
+			UpdateStatsStatic();
+			return S_FALSE;
+		}
+		m_bDlssSRNewPicture = true;   // a new feature starts its history on this picture
+		m_DlssSRMotion.Reset();
+		UpdateStatsStatic();
+	}
+
+	Tex2D_t* pInput = m_DlssSR.GetInput();
+	const HRESULT hr = TextureCopyRect(*pInputTexture, pInput->pTexture, rect, CRect(0, 0, w, h), m_pPS_Simple, nullptr, 0, false);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	return DlssSRRun(w, h, ppResult);
+}
+
+// What DLSS Super Resolution and the DLAA after scaling share, once the picture is in
+// the feature's input at w x h: its motion, and the network.
+HRESULT CDX11VideoProcessor::DlssSRRun(const UINT featW, const UINT featH, Tex2D_t** ppResult)
+{
+	Tex2D_t* pInput = m_DlssSR.GetInput();
 
 	// Motion only for a new picture: a redraw shows the same one, which has not
 	// moved. Optical Flow of its own, about 540 lines, on the very picture DLSS
@@ -391,8 +467,8 @@ HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	m_bDlssSRNewPicture = false;
 	if (bNewPicture) {
 		const CDlssStabilizer::FlowSettings flow = CDlssStabilizer::ForDlssSR();
-		if (!m_DlssSRMotion.Matches(inW, inH, true, flow)) {
-			m_DlssSRMotion.Create(m_pDevice, m_pDeviceContext, inW, inH,
+		if (!m_DlssSRMotion.Matches(featW, featH, true, flow)) {
+			m_DlssSRMotion.Create(m_pDevice, m_pDeviceContext, featW, featH,
 				m_pVSimpleInputLayout, m_pVS_Simple, m_pSamplerPoint, m_pSamplerLinear, true, flow);
 		}
 		if (m_DlssSRMotion.IsCreated()) {
@@ -422,8 +498,10 @@ HRESULT CDX11VideoProcessor::DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSr
 	const bool bEvaluated = m_DlssSR.Evaluate(pMotion, frameMs);
 	m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::SR);
 	if (!bEvaluated) {
-		// Latch off rather than failing on every picture.
+		// Latch off rather than failing on every picture. The DLAA after scaling keeps its
+		// step, which then copies the picture through as it is.
 		m_bDlssSRActive = false;
+		m_bDlaaAfterActive = false;
 		UpdateScalingStrings();
 		UpdateStatsStatic();
 		return E_FAIL;
@@ -479,7 +557,9 @@ void CDX11VideoProcessor::UpdateVPScale()
 	VPScaleKey key;
 	key.w = w;
 	key.h = h;
-	key.superRes = VPSuperResAllowed(m_srcParams.CDepth) ? m_iVPSuperRes : SUPERRES_Disable;
+	// Asked with what this turn takes -- ten bits, P010 or Y410 -- not with the source's
+	// depth (VPSuperResAllowed).
+	key.superRes = VPSuperResAllowed(10) ? m_iVPSuperRes : SUPERRES_Disable;
 	key.bPq = m_D3D11VP.IsPqSupported() != FALSE;
 	key.bKeepChroma = m_bVPReplaceChroma;
 	key.outFmt = m_D3D11OutputFmt;
@@ -687,10 +767,25 @@ HRESULT CDX11VideoProcessor::VPScalePass(Tex2D_t* pInputTexture, const CRect& rS
 // picture bound for a target wider than 8 bits, every real HDR film among them, which
 // the driver does take: on a PQ BT.2020 source in P010 the extension changes the
 // picture by 3.928, against 3.903 on the same frame in SDR (tools/dlssnr_probe
-// vp444_probe). Both turns of the processor ask it with the source's own facts.
+// vp444_probe).
+//
+// Upstream's reason holds: under automatic colour management the driver does what it does
+// on an HDR desktop (VPSuperResOutputsEightBits), and an 8-bit source written in more than
+// eight bits comes out as HDR10 read as SDR -- on an 8-bit H.264 film, mean 0.026 against
+// 0.039 without Super Resolution, colour 0.007 against 0.019 (playback_test --vpturns, a
+// half-float chain). So the first turn writes eight bits there too, and the test refuses
+// only a picture still written wider.
+//
+// Each turn asks it with the depth it takes. The first takes the source's; the second,
+// after DLSS 5 NR, always takes ten bits (UpdateVPScale). Asked with the source's depth
+// there, an 8-bit film under automatic colour management lost Super Resolution from 2.4
+// on: the network keeps the chain in half floats, which the test read as an 8-bit
+// picture written wider. Given ten bits in, the driver writes it right: within 0.26 of a
+// level of the shaders' enlargement on each channel (playback_test --afternr).
 bool CDX11VideoProcessor::VPSuperResAllowed(const int depth) const
 {
-	return !(m_bACMEnabled && !m_bVPUseRTXVideoHDR && depth == 8 && m_InternalTexFmt != DXGI_FORMAT_B8G8R8A8_UNORM);
+	return !(m_bACMEnabled && !m_bVPUseRTXVideoHDR && depth == 8 && m_InternalTexFmt != DXGI_FORMAT_B8G8R8A8_UNORM
+		&& !m_bVPOutEightBitsAsked);
 }
 
 // The size the processor's first turn writes where it does not resize: the source's, or
@@ -721,14 +816,16 @@ CSize CDX11VideoProcessor::VPConvertTexSize() const
 // a 10-bit film re-encoded in 8 bits, at every size tried; the original was right).
 // Given eight bits to write, it writes what it was asked: mean, peak and colour within
 // 0.001 of the processor's without Super Resolution, and its detail kept (0.0168 against
-// 0.0119). Eight bits lose nothing of an 8-bit source. Seen on an HDR desktop only, so
-// asked for there only.
+// 0.0119). Eight bits lose nothing of an 8-bit source. Seen on an HDR desktop, and on an
+// SDR one under Windows' automatic colour management, where upstream refuses Super
+// Resolution instead (VPSuperResAllowed): given eight bits there, mean, peak and colour
+// within 0.0005 of the processor's without it, and its detail kept (0.0024 against 0.0014).
 bool CDX11VideoProcessor::VPSuperResOutputsEightBits(const int depth)
 {
 	// The same question as the rtxHDR of InitializeD3D11VP, local tone mapping included.
 	const bool bRtxAsked = m_bVPRTXVideoHDR && m_bHdrPassthroughSupport && (m_bHdrPassthrough || m_bHdrLocalToneMapping)
 		&& m_iTexFormat != TEXFMT_8INT && !SourceIsHDR();
-	return m_bHdrDisplayModeEnabled && !bRtxAsked && depth == 8
+	return (m_bHdrDisplayModeEnabled || m_bACMEnabled) && !bRtxAsked && depth == 8
 		&& VPResizesFirst() && m_iVPSuperRes != SUPERRES_Disable;
 }
 

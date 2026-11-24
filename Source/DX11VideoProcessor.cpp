@@ -468,6 +468,14 @@ CDX11VideoProcessor::CDX11VideoProcessor(CMpcVideoRenderer* pFilter, const Setti
 	m_bDlssSRDlaa          = config.bDlssSRDlaa;
 	m_iDlssSRPreset        = config.iDlssSRPreset;
 	m_strDlssSRDllPath     = config.szDlssSRDllPath;
+	m_bDlaaAfterScaling    = config.bDlaaAfterScaling;
+	m_bDlaaAfterNR         = config.bDlaaAfterNR;
+	m_bHdrCurve            = config.bHdrCurve;
+	m_iHdrCurvePreset      = config.iHdrCurvePreset;
+	m_iHdrCurveStrength    = config.iHdrCurveStrength;
+	m_HdrCurveValues       = HdrCurve::ValuesOf(config);
+	m_HdrCurveConstants    = HdrCurve::ShaderConstants(HdrCurve::Applied(m_iHdrCurvePreset, m_HdrCurveValues,
+	                                                                     m_iHdrDisplayMaxNits, m_iHdrCurveStrength));
 	// Only Configure() used to take it, so the renderer made for each film had it on
 	// whatever the setting said: unticked, it stayed off until the next file.
 	m_bDlssRenderAhead     = config.bDlssRenderAhead;
@@ -791,6 +799,7 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_bDlssNRActive = false;
 	m_DlssSR.Shutdown();
 	m_bDlssSRActive = false;
+	m_bDlaaAfterActive = false;
 	m_DlssStageTimes.Release();
 	m_pVPTimingProbe.Release();
 	m_pPictureDoneQuery.Release();
@@ -822,6 +831,13 @@ void CDX11VideoProcessor::ReleaseDevice()
 	m_pPSConvertColorDeint.Release();
 
 	m_pPSHDR10ToneMapping.Release();
+	m_pPSHdrCurve.Release();
+	m_pHdrCurveConstantBuffer.Release();
+	m_pCSHdrTuneHist.Release();
+	m_pHdrTuneUAV.Release();
+	m_pHdrTuneBuffer.Release();
+	m_pHdrTuneStaging.Release();
+	m_pHdrTuneConstants.Release();
 	m_pPSSharpen.Release();
 	m_pPSSharpenDither.Release();
 	m_pSharpenConstants.Release();
@@ -917,10 +933,16 @@ UINT CDX11VideoProcessor::GetPostScaleSteps()
 	if (m_bDlssNRActive && m_bDlssNRAfterUpscale) {
 		nSteps++;
 	}
+	if (DlaaAfterStepCounted()) {
+		nSteps++;
+	}
 	if (m_pPSCorrection) {
 		nSteps++;
 	}
 	if (m_pPSHDR10ToneMapping) {
+		nSteps++;
+	}
+	if (HdrCurveStepCounted()) {
 		nSteps++;
 	}
 	if (m_pPSSharpen) {
@@ -1747,8 +1769,10 @@ void CDX11VideoProcessor::UpdateScalingStrings()
 		}
 	}
 	// DLSS Super Resolution takes over when the picture grows on both axes, and with
-	// DLAA when it does not grow at all.
+	// DLAA when it does not grow at all. A picture that shrinks keeps the Downscaling
+	// method's names, and DLAA after them is said by the statistics (DlssSRPass).
 	const bool bDlaa = m_bDlssSRActive && m_bDlssSRDlaa && w1 == w2 && h1 == h2;
+	m_bDlssSRDownscaled = m_bDlssSRActive && m_bDlssSRDlaa && !bDlaa && w2 <= w1 && h2 <= h1;
 	const bool bDlssSR = bDlaa || (m_bDlssSRActive && w2 > w1 && h2 > h1);
 	const wchar_t* upscaling = bDlaa ? L"DLSS SR (DLAA)"
 		: bDlssSR ? L"DLSS SR" : s_Upscaling11ResIDs[m_iUpscalingInUse].description;
@@ -2536,6 +2560,8 @@ BOOL CDX11VideoProcessor::InitMediaType(const CMediaType* pmt)
 	// Where the user asked for it, the shaders rebuild the chroma and the processor
 	// still takes the picture, in 4:4:4. Read here, so that it means "the option
 	// applies to this picture" and not "the processor was not going to take it".
+	// Whether its pass compiles is known only once the processor is set up.
+	m_bChromaPassFailed = false;
 	m_bChromaReplacedVP = !disableD3D11VP && ChromaToShaders(FmtParams, m_bInterlaced && m_bInterlacedSeen);
 	// The artifact removal for a processor keeping its own chroma: the planes are cleaned
 	// out of the decoder's texture and written back into the processor's own, which is
@@ -2809,8 +2835,17 @@ HRESULT CDX11VideoProcessor::InitializeD3D11VP(const FmtConvParams_t& params, co
 	if (m_bChromaReplacedVP) {
 		hr = UpdateConvertTo444Shader();
 		if (FAILED(hr)) {
-			DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : UpdateConvertTo444Shader() failed with error {}", HR2Str(hr));
-			return hr;
+			// A pass that does not compile must not cost the picture its processor. It
+			// did: the shaders took the whole conversion, which cannot do RTX Video HDR,
+			// into the swap chain made HDR10 for it above, and an SDR picture went out
+			// read as PQ BT.2020 -- far too bright, far too vivid (chroma sited top-left
+			// under Jinc, 3.0). The processor is set up again on the decoder's planes and
+			// rebuilds the chroma itself, as it does with the option off.
+			DLog(L"CDX11VideoProcessor::InitializeD3D11VP() : UpdateConvertTo444Shader() failed with error {}, the processor keeps its chroma", HR2Str(hr));
+			m_bChromaPassFailed = true;
+			m_bChromaReplacedVP = false;
+			m_bCleanVP = CleanVPWanted(params);
+			return InitializeD3D11VP(params, width, height, pmt);
 		}
 	}
 
@@ -3576,6 +3611,12 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 	}
 
 	if (m_pDXGISwapChain4) {
+		// The metadata as the display is to be told it: no peak above the HDR curve's cap.
+		const auto SendHdrMetadata = [&](const DXGI_HDR_METADATA_HDR10& hdr10) {
+			DXGI_HDR_METADATA_HDR10 sent = HdrMetadataToSend(hdr10);
+			return m_pDXGISwapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(sent), &sent);
+		};
+
 		if (m_Dovi.bValid) {
 			if (!m_hdr10.bValid && m_lastHdr10.bValid) {
 				m_hdr10.bValid = true;
@@ -3611,7 +3652,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 					if (!m_bVPUseRTXVideoHDR) {
 						if (m_hdr10.bValid) {
 							if (m_bHdrPassthrough) {
-								hr = m_pDXGISwapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(DXGI_HDR_METADATA_HDR10), &m_hdr10.hdr10);
+								hr = SendHdrMetadata(m_hdr10.hdr10);
 								DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : SetHDRMetaData(hdr) failed with error {}", HR2Str(hr));
 							}
 
@@ -3619,7 +3660,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 							UpdateStatsStatic();
 						} else if (m_lastHdr10.bValid) {
 							if (m_bHdrPassthrough) {
-								hr = m_pDXGISwapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(DXGI_HDR_METADATA_HDR10), &m_lastHdr10.hdr10);
+								hr = SendHdrMetadata(m_lastHdr10.hdr10);
 								DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : SetHDRMetaData(lastHdr) failed with error {}", HR2Str(hr));
 							}
 						} else {
@@ -3643,7 +3684,7 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 							}
 
 							if (m_bHdrPassthrough) {
-								hr = m_pDXGISwapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(DXGI_HDR_METADATA_HDR10), &m_lastHdr10.hdr10);
+								hr = SendHdrMetadata(m_lastHdr10.hdr10);
 								DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : SetHDRMetaData(Display P3 standard) failed with error {}", HR2Str(hr));
 							}
 
@@ -3655,13 +3696,22 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 		} else if (m_currentSwapChainColorSpace == colorSpace && m_hdr10.bValid) {
 			if (memcmp(&m_hdr10.hdr10, &m_lastHdr10.hdr10, sizeof(m_hdr10.hdr10)) != 0) {
 				if (m_bHdrPassthrough) {
-					hr = m_pDXGISwapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(DXGI_HDR_METADATA_HDR10), &m_hdr10.hdr10);
+					hr = SendHdrMetadata(m_hdr10.hdr10);
 					DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : SetHDRMetaData(hdr) failed with error {}", HR2Str(hr));
 				}
 
 				m_lastHdr10 = m_hdr10;
 				UpdateStatsStatic();
 			}
+		}
+
+		// The HDR curve's cap came, went or moved while the film plays: the display is told
+		// again, the film's own metadata through the new cap.
+		if (m_bHdrPassthrough && !m_bVPUseRTXVideoHDR && m_currentSwapChainColorSpace == colorSpace && m_lastHdr10.bValid
+				&& (m_bHdrCurveStep ? (unsigned)m_HdrCurveConstants.capNits : 0u) != m_uHdrCurveSentCap) {
+			hr = SendHdrMetadata(m_lastHdr10.hdr10);
+			DLogIf(FAILED(hr), L"CDX11VideoProcessor::Render() : SetHDRMetaData(curve cap) failed with error {}", HR2Str(hr));
+			UpdateStatsStatic();
 		}
 
 		if (m_bHdrLocalToneMapping && m_currentSwapChainColorSpace == colorSpace) {
@@ -3689,9 +3739,14 @@ HRESULT CDX11VideoProcessor::Render(int field, const REFERENCE_TIME frameStartTi
 
 	m_tracePasses = 0;
 	m_traceNRTiming = {};
+	// The HDR curve's tune waits for the first new picture after its seek: never a redraw
+	// of the one before it, and a picture only once the seek's flush has gone through. It is
+	// measured in the curve's step, drawn for it alone or for the curve.
+	m_bHdrTunePicture = field && HdrCurveStepCounted() && m_pFilter->m_HdrTune.Wants(m_pFilter->m_nFlushGen);
 	if (!m_renderRect.IsRectEmpty()) {
 		hr = Process(pBackBuffer, m_srcRect, m_videoRect, m_FieldDrawn == 2);
 	}
+	m_bHdrTunePicture = false;
 
 	// The picture as drawn, before anything goes over it, for the cadence slips: whether
 	// it opens a shot, and what a picture made before it would be made from. Timed with
@@ -4182,6 +4237,14 @@ void CDX11VideoProcessor::UpdatePostScaleTexures()
 	// Sharpening takes the dither on when it is the last step before it, which the
 	// count below has to know.
 	UpdateSharpenDitherShader();
+	// The HDR curve is a step only where the picture leaves in HDR -- not for the
+	// snapshot's SDR copy -- and only where it changes something. Decided here, with the
+	// count, so that the steps drawn are the steps the textures were made for.
+	m_bHdrCurveStep = m_bHdrCurve && !m_bSnapshot && HdrOutput() && !HdrCurve::Neutral(m_HdrCurveConstants);
+	// While the tune scans the film, the step is there to be measured even where the curve
+	// changes nothing: without it the picture the curve would receive may never be in a
+	// texture that can be read -- the step before it draws into the back buffer.
+	m_bHdrTuneStep = !m_bHdrCurveStep && !m_bSnapshot && HdrOutput() && m_pFilter->m_HdrTune.Active();
 
 	const UINT numPostScaleSteps = GetPostScaleSteps();
 	HRESULT hr = m_TexsPostScale.CheckCreate(m_pDevice, m_InternalTexFmt, m_windowRect.Width(), m_windowRect.Height(), numPostScaleSteps);
@@ -4746,10 +4809,12 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 		// picture: DLSS 5 NR after the resize, or the 3D conversion, which draws the
 		// subtitles first on what it reads. rRead is the part of its input a step reads:
 		// the picture where it lies, the first time, and where it was put from then on.
-		const bool bFirstStepDraws = m_pPSCorrection || m_pPSHDR10ToneMapping || m_pPSSharpen
+		const bool bFirstStepDraws = m_pPSCorrection || m_pPSHDR10ToneMapping || HdrCurveStepCounted() || m_pPSSharpen
 			|| !m_pPostScaleShaders.empty() || (m_bFinalPass && !m_pPSHalfOUtoInterlace);
+		const bool bDlaaStep = DlaaAfterStepCounted();
 		const bool bPlaceInFirstStep = rSrc != dstRect && rSrc.Size() == dstRect.Size() && rotation == 0 && !m_bFlip
-			&& rect == dstRect && bFirstStepDraws && !(m_bDlssNRActive && bAllowDlss && m_bDlssNRAfterUpscale);
+			&& rect == dstRect && bFirstStepDraws && !(m_bDlssNRActive && bAllowDlss && m_bDlssNRAfterUpscale)
+			&& !bDlaaStep;
 		CRect rRead = rect;
 
 		if (bPlaceInFirstStep) {
@@ -4761,6 +4826,30 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			m_DlssStageTimes.End(m_pDeviceContext, CGpuStageTimes::Resize);
 		} else {
 			pTex = pInputTexture; // Hmm
+		}
+
+		// DLAA after the resizing, on the picture where it lies at the size it is shown at.
+		// Always taken when counted: a picture it cannot run on -- a snapshot, a session that
+		// latched itself off, a size NGX refused -- is copied through, so that the steps
+		// after it find it where they expect it. Before DLSS 5 NR after the upscaling, unless
+		// it is asked to come after the network.
+		const bool bNRAfterStep = m_bDlssNRActive && bAllowDlss && m_bDlssNRAfterUpscale;
+		const auto DlaaStep = [&]() {
+			StepSetting();
+			Tex2D_t* pDlaa = nullptr;
+			if (m_bDlaaAfterActive && bAllowDlss && S_OK == DlaaAfterScalingPass(pInputTexture, rect, &pDlaa) && pDlaa) {
+				const CRect rDlaa(0, 0, pDlaa->desc.Width, pDlaa->desc.Height);
+				hr = TextureCopyRect(*pDlaa, pRT, rDlaa, rect, m_pPS_Simple, nullptr, 0, false);
+				m_bDlaaAfterRan = true;
+			} else {
+				hr = TextureCopyRect(*pInputTexture, pRT, rect, rect, m_pPS_Simple, nullptr, 0, false);
+				if (bAllowDlss) {
+					m_bDlaaAfterRan = false;
+				}
+			}
+		};
+		if (bDlaaStep && !(m_bDlaaAfterNR && bNRAfterStep)) {
+			DlaaStep();
 		}
 
 		if (m_bDlssNRActive && bAllowDlss && m_bDlssNRAfterUpscale) {
@@ -4780,6 +4869,9 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 			} else {
 				hr = TextureCopyRect(*pInputTexture, pRT, rect, rect, m_pPS_Simple, nullptr, 0, false);
 			}
+		}
+		if (bDlaaStep && m_bDlaaAfterNR && bNRAfterStep) {
+			DlaaStep();
 		}
 
 		// The finishing steps, as one figure in the statistics.
@@ -4817,6 +4909,14 @@ HRESULT CDX11VideoProcessor::Process(ID3D11Texture2D* pRenderTarget, const CRect
 				m_pDeviceContext->PSSetShaderResources(1, 1, &pNullSRV);
 				ReadHdrMeasureStats();
 			}
+			rRead = rect;
+		}
+
+		// The HDR curve, on the picture as it leaves in PQ: after the HLG conversion and the
+		// tone mapping, before the sharpening and the dither (DX11VideoProcessorHdrCurve.cpp).
+		if (HdrCurveStepCounted()) {
+			StepSetting();
+			hr = HdrCurvePass(pInputTexture, pRT, rRead, rect);
 			rRead = rect;
 		}
 
@@ -5077,6 +5177,8 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 	const auto backupWndRect = m_windowRect;
 	m_videoRect  = imageRect;
 	m_windowRect = imageRect;
+	// The snapshot is an SDR copy: the HDR curve, made for the display, stays out of it.
+	m_bSnapshot = true;
 	UpdateTexures();
 	UpdatePostScaleTexures();
 
@@ -5087,6 +5189,7 @@ HRESULT CDX11VideoProcessor::GetCurentImage(long *pDIBImage)
 
 	m_pFilter->m_pSub11CallBack = pSub11CallBack;
 
+	m_bSnapshot = false;
 	m_videoRect  = backupVidRect;
 	m_windowRect = backupWndRect;
 	UpdateTexures();
@@ -5359,6 +5462,7 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 	const bool bDlssNRActiveBefore = m_bDlssNRActive;
 	const bool bDlssSRActiveBefore = m_bDlssSRActive;
+	const bool bDlaaActiveBefore = m_bDlaaAfterActive;
 	const bool bRenderAheadBefore  = m_bDlssRenderAhead;
 	// Whether Super Resolution has taken the cleaning over: several settings decide it.
 	const bool bCleaningAllowedBefore = CleaningAllowed();
@@ -5427,6 +5531,15 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		// DlssSRPass makes a new one on the next picture; only another DLL ends
 		// the session.
 		bool bUpdateSR = false;
+		// The DLAA after scaling is a step of its own after the resizing: when it comes or
+		// goes, the post-scale textures are counted again.
+		const bool bDlaaStepBefore = DlaaAfterStepCounted();
+		if (config.bDlaaAfterScaling != m_bDlaaAfterScaling) {
+			m_bDlaaAfterScaling = config.bDlaaAfterScaling;
+			m_DlssSR.ReleaseFeature();   // its size is the picture's as shown, not DLSS SR's
+			bUpdateSR = true;
+		}
+		m_bDlaaAfterNR = config.bDlaaAfterNR;   // read by the next picture
 		if (m_strDlssSRDllPath != config.szDlssSRDllPath) {
 			m_strDlssSRDllPath = config.szDlssSRDllPath;
 			m_DlssSR.Shutdown();
@@ -5435,7 +5548,11 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		}
 		if (config.bDlssSR != m_bDlssSR) {
 			m_bDlssSR = config.bDlssSR;
+			m_DlssSR.ReleaseFeature();   // the DLAA after scaling's, or DLSS SR's own, goes
 			bUpdateSR = true;
+		}
+		if (DlaaAfterStepCounted() != bDlaaStepBefore) {
+			changeTextures = true;
 		}
 		if (config.bDlssSRDlaa != m_bDlssSRDlaa) {
 			// The feature was made for one pair of sizes, and DLAA is another pair.
@@ -5476,7 +5593,7 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 	m_bDlssRenderAhead = config.bDlssRenderAhead;
 	if (m_bDlssRenderAhead != bRenderAheadBefore || m_bDlssNRActive != bDlssNRActiveBefore
-			|| m_bDlssSRActive != bDlssSRActiveBefore || changeDlssFeature) {
+			|| m_bDlssSRActive != bDlssSRActiveBefore || m_bDlaaAfterActive != bDlaaActiveBefore || changeDlssFeature) {
 		// What render ahead measures has changed: it starts over.
 		m_RenderAhead.Reset();
 		m_DlssNRTimes.Reset();
@@ -5570,6 +5687,11 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 		m_bMpvChromaFailed = false;
 		changeConvertShader = (m_PSConvColorData.bEnable || m_bChromaReplacedVP)
 			&& (m_srcParams.Subsampling == 420 || m_srcParams.Subsampling == 422);
+		// A method whose 4:4:4 pass did not compile left the chroma to the processor;
+		// another one may compile, and only InitMediaType hands the chroma over again.
+		if (m_bChromaPassFailed) {
+			changeVP = true;
+		}
 	}
 
 	if (config.iHdrOsdBrightness != m_iHdrOsdBrightness) {
@@ -5635,6 +5757,21 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 	if (config.iHdrDisplayMaxNits != m_iHdrDisplayMaxNits) {
 		m_iHdrDisplayMaxNits = config.iHdrDisplayMaxNits;
 		//changeHDR = true;
+	}
+
+	{
+		// The HDR curve. New values only reach its constants, the display's peak among
+		// them, which scales the presets; a step that comes or goes counts the post-scale
+		// textures again.
+		const bool bCurveBefore = m_bHdrCurve && !HdrCurve::Neutral(m_HdrCurveConstants);
+		m_bHdrCurve         = config.bHdrCurve;
+		m_iHdrCurvePreset   = config.iHdrCurvePreset;
+		m_iHdrCurveStrength = config.iHdrCurveStrength;
+		m_HdrCurveValues    = HdrCurve::ValuesOf(config);
+		UpdateHdrCurve();
+		if ((m_bHdrCurve && !HdrCurve::Neutral(m_HdrCurveConstants)) != bCurveBefore) {
+			changeNumTextures = true;
+		}
 	}
 
 	if (config.iHdrToggleDisplay != m_iHdrToggleDisplay) {
@@ -5781,7 +5918,13 @@ void CDX11VideoProcessor::Configure(const Settings_t& config)
 
 	if (changeConvertShader) {
 		if (m_bChromaReplacedVP) {
-			UpdateConvertTo444Shader();   // the chroma the video processor no longer does
+			// The chroma the video processor no longer does. A pass that does not compile
+			// leaves nothing to write the processor's picture, which would then show
+			// whatever its texture held: the processor is set up again and does the
+			// chroma itself (InitializeD3D11VP).
+			if (FAILED(UpdateConvertTo444Shader())) {
+				InitMediaType(&m_pFilter->m_inputMT);
+			}
 		} else {
 			UpdateConvertColorShader();
 		}

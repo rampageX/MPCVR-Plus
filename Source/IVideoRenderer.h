@@ -161,6 +161,10 @@ constexpr inline auto DLSSNR_STAB_DEF  = 100;
 constexpr inline auto DLSSNR_FLOW_AUTO = 0;
 constexpr inline auto DLSSNR_FLOW_MAX  = 4;
 constexpr inline auto DLSSNR_FLOW_DEF  = DLSSNR_FLOW_AUTO;
+// Two thirds of the working size, between 1/2 and the size itself: not a whole divider,
+// so a value of its own after them, which leaves every saved one where it was.
+constexpr inline auto DLSSNR_FLOW_TWO_THIRDS = 5;
+constexpr inline auto DLSSNR_FLOW_LAST       = DLSSNR_FLOW_TWO_THIRDS;
 // The size DLSS 5 NR works at, per cent of the picture's each way. The network costs
 // in proportion to the pixels it is given; below 100 it runs on the picture reduced,
 // and the change it made is carried back onto the picture at its own size
@@ -329,8 +333,9 @@ struct Settings_t {
 	int iSharpenLevel;
 
 	// DLSS Super Resolution at the picture's own size: the network runs and nothing
-	// is enlarged, which is what games call DLAA. Only reached when the picture is
-	// already exactly the size it is shown at, so it costs nothing anywhere else.
+	// is enlarged, which is what games call DLAA. Reached when the picture is already
+	// exactly the size it is shown at, and when it shrinks: the Downscaling method
+	// brings it to the screen's size first, and DLSS runs on that.
 	bool bDlssSRDlaa;
 
 	// Another Upscaling method for an enlargement under five per cent -- a 4K film
@@ -350,7 +355,8 @@ struct Settings_t {
 	int  iDlssNRWorkingScale;
 
 	// What the working picture is divided by for the stabilizer's Optical Flow,
-	// DLSSNR_FLOW_*, 0 being Auto. DLSS Super Resolution keeps its own Auto.
+	// DLSSNR_FLOW_*, 0 being Auto and DLSSNR_FLOW_TWO_THIRDS 1.5. DLSS Super
+	// Resolution keeps its own Auto.
 	int  iDlssNRFlowDivider;
 
 	// Artifact removal on the decoded planes, before anything converts or resizes the
@@ -386,6 +392,34 @@ struct Settings_t {
 	// still gradient is averaged by the eye over several thresholds at every pixel.
 	// Direct3D 11.
 	bool bDitherMoving;
+
+	// DLSS's DLAA after the resizing, whoever resizes -- the shaders, a prescaler, the
+	// video processor with or without RTX Video Super Resolution -- at the size the
+	// picture is shown at. Not with DLSS Super Resolution, which is then the one
+	// resizing and has its own DLAA; ticked together, DLSS Super Resolution wins.
+	// bDlaaAfterNR puts it after DLSS 5 NR where the network runs after the upscaling;
+	// before it otherwise.
+	bool bDlaaAfterScaling;
+	bool bDlaaAfterNR;
+
+	// The HDR curve on every picture that leaves in HDR (Source/HdrCurve.h): a preset
+	// (HdrCurve::Custom, DarkLift...: appended only), the values Custom applies -- the
+	// shadow lift in 1/100 EV and the nits it fades out at, the mid grey, where the
+	// highlights roll off and how softly, the cap, 0 for none -- and the strength, per cent.
+	// Direct3D 11.
+	bool bHdrCurve;
+	int  iHdrCurvePreset;
+	int  iHdrCurveShadowLift;
+	int  iHdrCurveShadowRange;
+	int  iHdrCurveMidGrey;
+	int  iHdrCurveHighlightStart;
+	int  iHdrCurveRollOff;
+	int  iHdrCurvePeakCap;
+	int  iHdrCurveStrength;
+	// The key that tunes the HDR curve to the film playing (VideoRendererHdrTune.cpp), as a
+	// preset's key is held: a virtual key in the low byte, PRESETKEY_* above it; 0, none.
+	// Kept out of the presets.
+	int  iHdrCurveTuneKey;
 
 	Settings_t() {
 		SetDefault();
@@ -484,6 +518,19 @@ struct Settings_t {
 		iCadenceSlips                   = CADENCE_SLIPS_Off;
 		bSwapChainRenew                 = true;
 		bDitherMoving                   = false;
+		bDlaaAfterScaling               = false;
+		bDlaaAfterNR                    = false;
+		// HdrCurve.h's neutral values: off, Custom, and nothing changed were it on.
+		bHdrCurve                       = false;
+		iHdrCurvePreset                 = 0;
+		iHdrCurveShadowLift             = 0;
+		iHdrCurveShadowRange            = 10;
+		iHdrCurveMidGrey                = 203;
+		iHdrCurveHighlightStart         = 0;
+		iHdrCurveRollOff                = 100;
+		iHdrCurvePeakCap                = 0;
+		iHdrCurveStrength               = 100;
+		iHdrCurveTuneKey                = 0;
 	}
 };
 
@@ -510,6 +557,8 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 	dst.bDlssSRDlaa           = src.bDlssSRDlaa;
 	dst.iDlssSRPreset         = src.iDlssSRPreset;
 	wcscpy_s(dst.szDlssSRDllPath, src.szDlssSRDllPath);
+	dst.bDlaaAfterScaling     = src.bDlaaAfterScaling;
+	dst.bDlaaAfterNR          = src.bDlaaAfterNR;
 	// bDlssRenderAhead is not here: it belongs to the main page, which sets it for
 	// the prescalers as much as for DLSS.
 }
@@ -525,6 +574,7 @@ inline void CopyDlssSettings(Settings_t& dst, const Settings_t& src)
 inline void KeepOutOfPreset(Settings_t& sets, const Settings_t& current)
 {
 	sets.iDlssNRToggleKey     = current.iDlssNRToggleKey;
+	sets.iHdrCurveTuneKey     = current.iHdrCurveTuneKey;
 	sets.iSdrPeakWindowMs     = current.iSdrPeakWindowMs;
 	sets.iSdrPeakFloorNits    = current.iSdrPeakFloorNits;
 	sets.bSdrPeakSceneCuts    = current.bSdrPeakSceneCuts;

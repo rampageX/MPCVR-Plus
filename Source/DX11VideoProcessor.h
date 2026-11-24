@@ -39,6 +39,7 @@
 #include "DLSS/DlssTiming.h"
 #include "DLSS/DwmKeepAlive.h"
 #include "Cadence/SceneCut.h"
+#include "HdrCurve.h"
 #include "FrameGen/echo/EchoFlow.h"
 #include "FrameGen/echo/EchoSynth11.h"
 #include "Upscale/MpvShader.h"
@@ -281,6 +282,7 @@ private:
 
 	bool m_bVPReplaceChroma = false;    // the setting
 	bool m_bChromaReplacedVP = false;   // and the shaders rebuild this source's chroma
+	bool m_bChromaPassFailed = false;   // asked to and could not: the pass did not compile
 	DXGI_FORMAT m_VPInputFmt = DXGI_FORMAT_UNKNOWN;   // what the processor reads: the source, or packed 4:4:4
 	CComPtr<ID3D11ComputeShader> m_pCSConvertTo444;   // what writes that 4:4:4 picture
 
@@ -372,7 +374,40 @@ private:
 	std::wstring m_strDlssSRDllPath;
 	bool m_bDlssSR = false;             // user setting
 	bool m_bDlssSRActive = false;
-	bool m_bDlssSRDlaa = false;   // run it at the picture's own size as well
+	bool m_bDlssSRDlaa = false;   // run it at the picture's own size as well, and after the downscalers
+	bool m_bDlssSRDownscaled = false;   // the picture at hand shrinks, and DLSS's DLAA follows the downscalers
+	// DLAA after the resizing, whoever resizes, with DLSS Super Resolution off: the
+	// settings, and whether its session is up.
+	bool m_bDlaaAfterScaling = false;
+	bool m_bDlaaAfterNR = false;
+	bool m_bDlaaAfterActive = false;
+	bool m_bDlaaAfterRan = false;   // the last picture went through it (a snapshot leaves it as it was)
+
+	// The HDR curve (Source/HdrCurve.h), the last change to the light of every picture that
+	// leaves in HDR: the settings, the constants they resolve to on this display, and the
+	// cap the HDR10 metadata last announced, so that a new one is sent when it changes.
+	bool m_bHdrCurve = false;
+	int  m_iHdrCurvePreset = HdrCurve::Custom;
+	int  m_iHdrCurveStrength = HdrCurve::kStrengthDef;
+	HdrCurve::Values m_HdrCurveValues;
+	HdrCurve::Constants m_HdrCurveConstants = {};
+	HdrCurve::Constants m_HdrCurveUploaded = {};   // what the constant buffer holds
+	CComPtr<ID3D11PixelShader> m_pPSHdrCurve;
+	CComPtr<ID3D11Buffer> m_pHdrCurveConstantBuffer;
+	unsigned m_uHdrCurveSentCap = 0;
+	bool m_bHdrCurveStep = false;   // a step of the post-scale chain (UpdatePostScaleTexures)
+	bool m_bHdrCurveRan = false;    // the last picture went through it, for the statistics
+	bool m_bSnapshot = false;       // GetCurentImage is drawing its SDR copy
+	// The curve's tune (VideoRendererHdrTune.cpp): the step drawn for its measurement alone,
+	// while it scans the film and the curve changes nothing; the picture being one it waits
+	// for; and what it is measured with (cs_hdr_tune_hist.hlsl), made when first wanted.
+	bool m_bHdrTuneStep = false;
+	bool m_bHdrTunePicture = false;
+	CComPtr<ID3D11ComputeShader> m_pCSHdrTuneHist;
+	CComPtr<ID3D11Buffer> m_pHdrTuneBuffer;
+	CComPtr<ID3D11UnorderedAccessView> m_pHdrTuneUAV;
+	CComPtr<ID3D11Buffer> m_pHdrTuneStaging;
+	CComPtr<ID3D11Buffer> m_pHdrTuneConstants;
 	// The Upscaling method for an enlargement under five per cent, and the one of
 	// the two that the picture at hand is really getting.
 	bool m_bUpscalingSmall = false;
@@ -458,7 +493,7 @@ private:
 	// holding those pictures back counted every one of them late for no reason.
 	// And every picture counts while pictures are being presented for a refresh chosen
 	// in advance: each has to be asked for early to be there for its own.
-	bool RenderAheadActive() const { return m_bDlssRenderAhead && (m_bScheduled || m_bDlssNRActive || m_bDlssSRActive || m_bMpvLumaRan); }
+	bool RenderAheadActive() const { return m_bDlssRenderAhead && (m_bScheduled || m_bDlssNRActive || m_bDlssSRActive || m_bDlaaAfterActive || m_bMpvLumaRan); }
 
 	// Who resizes when "Use the video processor for resizing" is ticked: the processor,
 	// in whichever of its two turns comes after everything that needs the source's
@@ -563,7 +598,6 @@ private:
 	int m_cadenceProbeCount = 0, m_cadenceProbeNext = 0;
 	float m_cadenceEchoProbe[5] = {};          // the probe when m_cadenceEchoMs[i] was timed; 0, none
 	long long m_cadenceMadeRt = 0;             // the last made picture's time, for its line in the trace
-	unsigned m_cadenceMadeLate = 0;            // made pictures the GPU had not finished by their Present, left out
 	CComPtr<ID3D11Query> m_pCadenceDrawnQuery; // whether the GPU is done with the drawn picture, then with the made one
 	bool m_bCadenceMadeQueued = false;         // the last picture had one made, shown or not: its GPU time is not a drawn picture's
 	double CadenceEchoMs() const;
@@ -603,7 +637,9 @@ private:
 
 	CDlssStabilizer::FlowSettings DlssNRFlow() const
 	{
-		return CDlssStabilizer::ForDlssNR((UINT)m_iDlssNRFlowDivider);   // 0, Auto: the stabilizer's own FlowFactor
+		// 0, Auto: the stabilizer's own FlowFactor. Two thirds is 1.5 working pixels a flow pixel.
+		const float factor = m_iDlssNRFlowDivider == DLSSNR_FLOW_TWO_THIRDS ? 1.5f : (float)m_iDlssNRFlowDivider;
+		return CDlssStabilizer::ForDlssNR(factor);
 	}
 	D3D_FEATURE_LEVEL m_FeatureLevel = D3D_FEATURE_LEVEL_10_0;
 
@@ -828,6 +864,24 @@ private:
 	// both axes, or no feature can be made for these sizes -- and the resize shaders
 	// then do the whole job.
 	HRESULT DlssSRPass(Tex2D_t* pInputTexture, const CRect& rSrc, const CRect& dstRect, const int rotation, Tex2D_t** ppResult);
+	// DLAA on rect of a post-scale texture, the picture at the size it is shown at.
+	// S_FALSE where no feature can be made for its size: the step copies it through.
+	HRESULT DlaaAfterScalingPass(Tex2D_t* pInputTexture, const CRect& rect, Tex2D_t** ppResult);
+	HRESULT DlssSRRun(UINT featW, UINT featH, Tex2D_t** ppResult);
+	bool DlaaAfterStepCounted() const;
+	// The HDR curve: whether the picture leaves in HDR, whether the curve is a step of the
+	// post-scale chain, the constants worked out again from the settings, and the HDR10
+	// metadata as it is to be sent, its peaks no higher than the curve's cap.
+	bool HdrOutput() const;
+	bool HdrCurveStepCounted() const;
+	void UpdateHdrCurve();
+	HRESULT HdrCurvePass(Tex2D_t* pInputTexture, ID3D11Texture2D* pRenderTarget, const CRect& rRead, const CRect& rect);
+	DXGI_HDR_METADATA_HDR10 HdrMetadataToSend(const DXGI_HDR_METADATA_HDR10& hdr10);
+	HRESULT MeasureHdrTune(const Tex2D_t& tex, const CRect& rect);
+public:
+	const wchar_t* HdrTuneRefusal() override;
+	void HdrTuneStepChanged() override;
+private:
 	bool DlssSRSupportedHere() const;
 	void UpdateDlssSR();
 	std::wstring GetDlssSRStatus() override;

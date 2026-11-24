@@ -1,9 +1,9 @@
 # The reference numbers
 
-`run_all_report.txt` here is what the whole battery measured on 17 November 2026, on an
-RTX 4060 (driver 621.14) with the Windows desktop in HDR, Windows' hardware-accelerated GPU
+`run_all_report.txt` here is what the whole battery measured on 24 November 2026, on an
+RTX 4060 (driver 621.24) with the Windows desktop in HDR, Windows' hardware-accelerated GPU
 scheduling on and NVIDIA's *Prefer maximum performance* set in the driver's global settings,
-all thirty-four steps green. The filter and the tools are the code of `8be64abe`, as the
+all forty-seven steps green. The filter and the tools are the code of `b7fe1402`, as the
 report's commit line says, both built by MSVC 14.44. `run_all.cmd` masks
 the working folder and the user's profile in it (`<repo>`, `%USERPROFILE%`). It is the thing a
 merge from upstream is compared against, at step 8 of
@@ -38,6 +38,146 @@ down. The tables move with:
 So the baseline is a local artefact of a known-good state, not a universal truth. When a
 merge lands and the numbers are explained, replace this file with the new report — that is
 step 10.
+
+## 24 November 2026: the HDR curve, and its tune to the film
+
+Against the report it replaces (`13ec7929`, 22 November), 3477 rows compared, 11 moved, none
+gone and 147 new, no failure in either; forty-seven steps where there were thirty-eight. The
+machine, its driver and RTX Video HDR's settings are those of the sections below, the driver
+from the same folder of the driver store in both reports, and the card ran at its full clocks
+(DLSS off ready in 3.3 ms, 3.4 before). The filter's settings were the registry's of the day,
+with the HDR curve set off for the run and put back after: the steps that do not ask for the
+curve measure the picture without it. The code since: the driver's Super Resolution at the
+picture's own size, measured and said in the statistics (`683145ca`, `568190e4`, `a8846a01`);
+the HDR curve, Veyra's, on every picture that leaves in HDR, with its tab (`b0c188df`,
+`5c08dcc2`, `fb023252`); and the curve tuned to the film on a key (`f8ac353c`, `b7fe1402`).
+
+- The 147 new rows are the curve's, in nine steps of its own:
+  - "the HDR curve against its sum" (32): the shader against the curve computed on the CPU,
+    and the presets against Veyra's values;
+  - "the HDR curve's tune, its sums" (29): the tune's histograms from the GPU against the
+    CPU's, the percentiles read from them within 0.002 bin, and the tune on made-up films --
+    one at the targets left as it is, 4000 nits brought under an 800-nit cap from BT.2390's
+    knee, sunk shadows lifted by +0.90 EV and wanting less a second time;
+  - "the Settings page, HDR curve" (29), the tab and the display's peak typed into it;
+  - "HDR settings changed while playing" (14): the curve, RTX Video HDR and the chroma
+    replacement switched while a film plays, the screen moving on through each;
+  - "the HDR curve on an RTX Video HDR picture" (11): *Dark and bright* at 100 %, the shadows
+    on screen 1.58 to 2.58 nits;
+  - "the HDR curve tuned to the film" (17): 16 places of 16 measured in 3.3 s, the film back
+    on its picture to the millisecond and playing, lift +1.00 EV to 3 nits kept in the filter
+    and in the registry, and the same values from a second tune made through the curve;
+  - "the HDR curve's tune cancelled" (7) and "the HDR curve's tune and the player's Play" (8):
+    7 and 8 places measured before the key or the Play, nothing kept the one way and the
+    values kept the other, the film back on its picture both times;
+  - "the HDR curve's tune and the player's Stop" prints a verdict and no row: the graph let go
+    at once, the tune's thread gone 5 s after.
+- 10 rows of the logo step, all of its three logos through x264, which does not encode the film
+  the same from one run to the next (the sections below); the largest in decibels, 41.21 to
+  40.59.
+- 1 row is a time printed bare: the pipeline's slowest picture from upload to done, 0.42 to
+  0.72 ms.
+
+None of the eleven is the new code's. Super Resolution at the picture's own size is in no step:
+the battery's films are enlarged, and `vp444_probe --native` and `playback_test --vpturns`
+measured it, as the manual says.
+
+## 22 November 2026: Optical Flow at 2/3, and DLAA after scaling
+
+Against the report it replaces (`c925178c`, 19 November), 3476 rows compared, 15 moved, none
+gone and 1 new, no failure in either; thirty-eight steps, as before. The machine, its driver
+and RTX Video HDR's settings are those of the sections below, and the card ran at its full
+clocks (DLSS off ready in 3.4 ms, 3.1 before). The code since: the statistics' *Render ahead*
+and *Hiccups* lines worded for what they count (`178c3e1d`), the tools built without a warning
+(`c863bd88`), Optical Flow at 2/3 of DLSS 5 NR's working picture (`7c027b29`), DLSS SR's DLAA
+after the downscalers (`561371de`), and DLSS's DLAA after scaling as an option of its own
+(`13ec7929`).
+
+- The new row is the check `--tstabport` gained with 2/3, "the stabilizer against the
+  harness": the flow frame at 1.5 working pixels a flow pixel against the same box computed on
+  the CPU, `[ok]`. The 31 rows of that step before it read as they did.
+- 11 rows of the logo step, all of its three logos through x264, which does not encode the film
+  the same from one run to the next (the sections below); the largest in decibels, 40.27 to
+  40.71.
+- 4 rows are times printed bare: the statistics' total in "a snapshot leaves RTX Video HDR's
+  picture as it was", 2.0 to 2.1 ms; one row of "the DLSS passes against the harness", the
+  vectors' GPU time a picture, the share of blocks keeping their own vector the same; and two of
+  "the pipeline", its slowest picture from upload to done, 9.56 to 8.13 and 0.82 to 0.42 ms.
+
+None of them is the new code's. The *Render ahead* line now ends on `after Present` where it
+read `not in time`, which the comparison leaves out as a time. The 2/3 notch, DLSS SR's DLAA and
+the DLAA after scaling are reached by no step with the settings the battery runs: they were
+measured with `--tstabbench`, `--tnrscale --nrflow`, `playback_test --dlaa` and `--dlaaafter`, as
+the manual says. The steps of the Settings page and "what the Settings page greys", with its new
+table of the DLAA after scaling against DLSS SR, print verdicts and no numbers: all green.
+
+## 19 November 2026: Super Resolution under automatic colour management
+
+Against the report it replaces (`27088fd5`, 18 November), 3468 rows compared, 20 moved, none
+gone and 8 new, no failure in either; thirty-eight steps where there were thirty-seven. The
+machine, its driver and RTX Video HDR's settings are those of the section below, and the card
+ran at its full clocks (DLSS off ready in 3.1 ms, 3.4 before). The code since: the video window
+made again without waiting with no limit on the thread that holds it (`3667fee3`), the driver's
+Super Resolution under Windows' automatic colour management with DLSS 5 NR (`eae20268`), and
+`playback_test --nrafter` with the step that runs it (`c925178c`).
+
+- The 8 new rows are that step's, "the processor enlarging before DLSS 5 NR": DLSS 5 NR
+  applied after the upscaling, the processor enlarging in its one turn before the network.
+  With Super Resolution, the still against the shaders' enlargement shifts by R +0.39, G +0.28,
+  B +0.61 and its blocks by 0.60 in 8-bit levels; without it, with the chroma replaced or
+  not, by 0.07 at most and its blocks by 0.18.
+- 14 rows of the logo step, all of its three logos through x264, which does not encode the
+  film the same from one run to the next (the sections below); the largest in decibels, 48.85
+  to 48.57.
+- 6 rows are times printed bare: three of "the DLSS passes against the harness", the vectors'
+  GPU time a picture (1.32 to 1.49 ms the largest), the share of blocks keeping their own
+  vector the same; two of "the pipeline", its slowest picture from upload to done, 8.23 to 9.56
+  and 0.45 to 0.82 ms; and the statistics' total in "a snapshot leaves RTX Video HDR's picture
+  as it was", 2.1 to 2.0 ms.
+
+The fix for automatic colour management is in no step: Windows does not apply it to an HDR
+desktop, and the filter does not look for it there. It was measured with `playback_test
+--afternr`, with and without `--nrafter`, on the desktop in SDR with the management on; the
+manual gives the figures, where it says what the driver's Super Resolution does on an HDR
+desktop.
+
+## 18 November 2026: 3.0, and chroma sited top-left
+
+Against the report it replaces (`8be64abe`, 17 November), 3236 rows compared, 89 moved, none
+gone and 232 new, no failure in either; thirty-seven steps where there were thirty-four. The
+machine is the one of the sections below, with the NVIDIA driver at 621.24 where it was 621.14,
+and RTX Video HDR set in the NVIDIA app to a peak of 790 nits, mid grey 45, contrast 118 and
+saturation 90, which the statistics now print. The playback steps render as fast as before
+(DLSS off ready in 3.4 ms, DLSS SR 3.7, NR + SR 9.0; 3.4, 3.9 and 9.2 in the report before):
+the card ran at its full clocks. The code since: release 3.0 -- EWA Lanczos Sharp, EWA Ginseng
+and EWA Lanczos4 Sharpest for the chroma, Anime4K CNN x2 M AR, a new dither pattern each
+picture, the measured peak starting over at a scene cut, the hiccup watched only where it
+comes, the NVIDIA app's settings in the statistics -- and the 4:4:4 chroma pass compiling again
+on chroma sited top-left (`27088fd5`).
+
+- The 232 new rows are 3.0's. Three steps of its own: "the dither before output" (14 rows),
+  "the peak HDR tone mapping follows" (17) and "a snapshot leaves RTX Video HDR's picture as it
+  was" (8). Anime4K in "upscalers on film" (132, with and without its anti-ringing) and in "the
+  prescalers against the harness" (11); the three EWA kernels in the two chroma steps (3 each);
+  the cases of the hiccup watched and not watched in "the cadence slips' schedule" (26); the
+  lists' new entries in the four steps of the Settings page (4 each); and an On screen line in
+  the two steps of the upscalers through the filter.
+- 72 rows of the Settings page, 18 in each of its four steps: the lists in measured order,
+  read by position, with the new entries put in among them.
+- 10 rows of the logo step, its logos through x264, which does not encode the film the same
+  from one run to the next (the sections below); the largest in decibels, 48.49 to 49.24.
+- 4 rows of the two chroma steps, RTX Video HDR on, the processor's own chroma and the 4:4:4
+  pass alike: psnr-rgb 22.61 to 22.93 and 22.62 to 22.94 in 8 bits, 22.45 to 22.79 and 22.54 to
+  22.88 in 10. RTX Video HDR's own settings or the new driver; with it off nothing moved.
+- 2 rows of "the DLSS passes against the harness" and one of "the pipeline", times printed
+  bare: the vectors' GPU time a picture, 1.76 to 1.97 ms the largest, and the pipeline's slowest
+  picture from upload to done, 0.77 to 0.45 ms. The share of blocks keeping their own vector,
+  printed beside, did not move.
+
+The top-left fix moves none of them: the battery's chroma steps site the chroma left, and there
+the code the filter generates is the same to the byte. `shader444_test`, "the generated 4:4:4
+chroma pass", now compiles each method for the three sitings and the shaders' own conversion
+too, 240 shaders, which the comparison does not count as rows: they print no number.
 
 ## 17 November 2026: DWM kept composing in a window
 

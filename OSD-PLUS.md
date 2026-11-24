@@ -1,13 +1,12 @@
 # OSD Plus (rampageX fork)
 
-## Version 1.0.9
+## Version 1.0.10 (test build)
 
-Integrates the pinned MPCVR-Plus 3.0 release (`3157c1123d0d20139cab8bbd28bcdd3c6412d928`), including
-new chroma upsamplers, Anime4K, temporal dithering, HDR scene-cut handling,
-NVIDIA app statistics, and fixes from 2.9. The upstream now includes our
-MPC-BE dark dialog adaptation (PR #6); it must not be applied twice.
-Our OSD-Plus version label and hidden sync graph remain fork-specific.
-Future updates remain ordinary Git merges.
+Integrates the pinned MPCVR-Plus 3.2 release (`e5f1140d3375a0e14af6c98f8c6d77239dae66a2`),
+including the 3.0.1, 3.0.2 and 3.1 updates where present in upstream history.
+Adds the HDR curve, HDR auto tune, post-scaling DLAA and updated OSD statistics.
+Retains the upstream MPC-BE dark-dialog implementation (PR #6), our independent
+OSD-Plus version label and hidden sync graph. Future updates remain ordinary Git merges.
 
 ## Branches and upstream updates
 

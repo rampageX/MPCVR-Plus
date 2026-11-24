@@ -361,6 +361,9 @@ public:
 	long long ReadyBy(const Plan& plan) const;
 	// A sample was left out before it was drawn, as a Plan asked.
 	void LeftOut();
+	// A made picture was not finished by its refresh and was left out: the slip it was for
+	// showed as a plain one.
+	void MadeLate();
 	// msInside: how long Present took to return. bReady: the GPU had finished the picture
 	// by then.
 	void Presented(unsigned presentId, const Plan& plan, long long tickCalled, double msInside, bool bReady);
@@ -377,10 +380,13 @@ public:
 	unsigned DroppedCount() const { return m_dropped; }
 	unsigned LateCount() const { return m_late; }      // shown later than the refresh chosen
 	// Cadence slips (SetCadenceSlips): taken on a cut, forced for want of one, and of those
-	// forced, how many showed a made picture on the refresh they added.
+	// forced, how many showed a made picture on the refresh they added, and how many had one
+	// made that came too late to be shown. Counted here, so that they start again with the
+	// rest at a Reset.
 	unsigned SlipsOnCut() const { return m_slipsOnCut; }
 	unsigned SlipsForced() const { return m_slipsForced; }
 	unsigned MadeShown() const { return m_madeShown; }
+	unsigned MadeLateCount() const { return m_madeLate; }
 	// The step is being kept past the nearest refresh, waiting for a cut.
 	bool SlipWaiting() const { return m_bSlipWaiting; }
 	// The last picture was in a cadence whose slips are placed and come often enough to be
@@ -455,6 +461,7 @@ private:
 	unsigned m_slipsOnCut = 0;
 	unsigned m_slipsForced = 0;
 	unsigned m_madeShown = 0;
+	unsigned m_madeLate = 0;
 
 	// The pictures' times as the schedule goes by them (kDueGain).
 	bool m_bDue = false;
@@ -662,9 +669,10 @@ public:
 	// Resize: the resize shader. Finish: everything after it, dither included.
 	// Deblock, Deband: the artifact removal on the decoded planes, as the sample is
 	// copied; the write back into the processor's input is the last one's. Cadence: the
-	// picture copied out for the cadence slips and measured for a scene cut.
+	// picture copied out for the cadence slips and measured for a scene cut. SRDownscale:
+	// the Downscaling method shrinking the picture for DLSS SR's DLAA at the screen's size.
 	enum Stage { NRMotion, NRStabilize, SRMotion, SR, MpvLuma, MpvChroma, VPScale, NRReduce, NRCompose,
-		VP, ShaderConvert, Prepass, Resize, Finish, Deblock, Deband, Logo, Cadence, StageCount };
+		VP, ShaderConvert, Prepass, Resize, Finish, Deblock, Deband, Logo, Cadence, SRDownscale, StageCount };
 
 	void Release();
 

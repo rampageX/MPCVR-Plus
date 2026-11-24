@@ -29,6 +29,7 @@
 #include "VideoRendererInputPin.h"
 #include "Version.h"
 #include "VideoRenderer.h"
+#include "HdrCurve.h"
 #include "SubPic/XySubPicProvider.h"
 #include "SubPic/XySubPicQueueImpl.h"
 
@@ -107,12 +108,24 @@
 #define OPT_CadenceSlips                   L"CadenceSlips"
 #define OPT_SwapChainRenew                 L"SwapChainRenew"
 #define OPT_DitherMoving                   L"DitherMoving"
+#define OPT_DlaaAfterScaling               L"DlaaAfterScaling"
+#define OPT_DlaaAfterNR                    L"DlaaAfterNR"
+#define OPT_HdrCurve                       L"HdrCurve"
+#define OPT_HdrCurvePreset                 L"HdrCurvePreset"
+#define OPT_HdrCurveShadowLift             L"HdrCurveShadowLift"
+#define OPT_HdrCurveShadowRange            L"HdrCurveShadowRange"
+#define OPT_HdrCurveMidGrey                L"HdrCurveMidGrey"
+#define OPT_HdrCurveHighlightStart         L"HdrCurveHighlightStart"
+#define OPT_HdrCurveRollOff                L"HdrCurveRollOff"
+#define OPT_HdrCurvePeakCap                L"HdrCurvePeakCap"
+#define OPT_HdrCurveStrength               L"HdrCurveStrength"
 #define OPT_SdrToneMappingType             L"SdrToneMappingType"
 // registry only, not saved
 #define OPT_SdrPeakWindowMs                L"SdrPeakWindowMs"
 #define OPT_SdrPeakFloorNits               L"SdrPeakFloorNits"
 // upstream's name, saved here: it is on the HDR tab
 #define OPT_SdrPeakSceneCuts               L"SdrPeakSceneCuts"
+#define OPT_HdrCurveTuneKey                L"HdrCurveTuneKey"
 
 static std::atomic_int g_nInstance = 0;
 
@@ -310,7 +323,7 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 		sets.iDlssNRWorkingScale = discard<int>((int)dw, DLSSNR_SCALE_DEF, DLSSNR_SCALE_MIN, DLSSNR_SCALE_MAX);
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRFlowDivider, dw)) {
-		sets.iDlssNRFlowDivider = discard<int>((int)dw, DLSSNR_FLOW_DEF, DLSSNR_FLOW_AUTO, DLSSNR_FLOW_MAX);
+		sets.iDlssNRFlowDivider = discard<int>((int)dw, DLSSNR_FLOW_DEF, DLSSNR_FLOW_AUTO, DLSSNR_FLOW_LAST);
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlssNRToggleKey, dw)) {
 		sets.iDlssNRToggleKey = discard<int>((int)dw, VK_F12, 0, 0xFF);
@@ -365,6 +378,42 @@ static void ReadSettings(CRegKey& key, Settings_t& sets)
 	}
 	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DitherMoving, dw)) {
 		sets.bDitherMoving = !!dw;
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlaaAfterScaling, dw)) {
+		sets.bDlaaAfterScaling = !!dw;
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_DlaaAfterNR, dw)) {
+		sets.bDlaaAfterNR = !!dw;
+	}
+	// The HDR curve, each value held to HdrCurve.h's range; a roll-off's start and a cap
+	// are 0, none, or within theirs. The lift is negative to darken, through the DWORD as
+	// two's complement.
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurve, dw)) {
+		sets.bHdrCurve = !!dw;
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurvePreset, dw)) {
+		sets.iHdrCurvePreset = discard<int>((int)dw, HdrCurve::Custom, HdrCurve::Custom, HdrCurve::PresetCount - 1);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveShadowLift, dw)) {
+		sets.iHdrCurveShadowLift = discard<int>((int)dw, 0, HdrCurve::kLiftMin, HdrCurve::kLiftMax);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveShadowRange, dw)) {
+		sets.iHdrCurveShadowRange = discard<int>((int)dw, HdrCurve::kRangeDef, HdrCurve::kRangeMin, HdrCurve::kRangeMax);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveMidGrey, dw)) {
+		sets.iHdrCurveMidGrey = discard<int>((int)dw, HdrCurve::kMidNeutral, HdrCurve::kMidMin, HdrCurve::kMidMax);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveHighlightStart, dw)) {
+		sets.iHdrCurveHighlightStart = HdrCurve::ClampOrZero((int)dw, HdrCurve::kStartMin, HdrCurve::kStartMax);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveRollOff, dw)) {
+		sets.iHdrCurveRollOff = discard<int>((int)dw, HdrCurve::kRollDef, HdrCurve::kRollMin, HdrCurve::kRollMax);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurvePeakCap, dw)) {
+		sets.iHdrCurvePeakCap = HdrCurve::ClampOrZero((int)dw, HdrCurve::kCapMin, HdrCurve::kCapMax);
+	}
+	if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveStrength, dw)) {
+		sets.iHdrCurveStrength = discard<int>((int)dw, HdrCurve::kStrengthDef, HdrCurve::kStrengthMin, HdrCurve::kStrengthMax);
 	}
 }
 
@@ -444,6 +493,17 @@ static void WriteSettings(CRegKey& key, const Settings_t& sets)
 	key.SetDWORDValue(OPT_CadenceSlips,        sets.iCadenceSlips);
 	key.SetDWORDValue(OPT_SwapChainRenew,      sets.bSwapChainRenew);
 	key.SetDWORDValue(OPT_DitherMoving,        sets.bDitherMoving);
+	key.SetDWORDValue(OPT_DlaaAfterScaling,    sets.bDlaaAfterScaling);
+	key.SetDWORDValue(OPT_DlaaAfterNR,         sets.bDlaaAfterNR);
+	key.SetDWORDValue(OPT_HdrCurve,            sets.bHdrCurve);
+	key.SetDWORDValue(OPT_HdrCurvePreset,      sets.iHdrCurvePreset);
+	key.SetDWORDValue(OPT_HdrCurveShadowLift,  (DWORD)sets.iHdrCurveShadowLift);
+	key.SetDWORDValue(OPT_HdrCurveShadowRange, sets.iHdrCurveShadowRange);
+	key.SetDWORDValue(OPT_HdrCurveMidGrey,     sets.iHdrCurveMidGrey);
+	key.SetDWORDValue(OPT_HdrCurveHighlightStart, sets.iHdrCurveHighlightStart);
+	key.SetDWORDValue(OPT_HdrCurveRollOff,     sets.iHdrCurveRollOff);
+	key.SetDWORDValue(OPT_HdrCurvePeakCap,     sets.iHdrCurvePeakCap);
+	key.SetDWORDValue(OPT_HdrCurveStrength,    sets.iHdrCurveStrength);
 }
 
 // The settings are this renderer's own. The original is often on the same machine -- MPC-HC
@@ -606,6 +666,11 @@ CMpcVideoRenderer::CMpcVideoRenderer(LPUNKNOWN pUnk, HRESULT* phr)
 		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_SdrPeakSceneCuts, dw)) {
 			m_Sets.bSdrPeakSceneCuts = !!dw;
 		}
+		// The HDR curve's tune key, as a preset's key: read here, written by SaveSettings, in
+		// no preset.
+		if (ERROR_SUCCESS == key.QueryDWORDValue(OPT_HdrCurveTuneKey, dw)) {
+			m_Sets.iHdrCurveTuneKey = (dw & 0xFF) ? (int)(dw & PRESETKEY_Mask) : 0;
+		}
 	}
 	ReadPresetKeys();
 
@@ -683,6 +748,26 @@ LRESULT CALLBACK CMpcVideoRenderer::ToggleKeyProc(int code, WPARAM wParam, LPARA
 		}
 	}
 
+	// The HDR curve's tune: its key with what is held, as a preset's. Pressed again while it
+	// runs, it stops it (StartHdrTune). Before the toggle key, which answers whatever is held.
+	if (code == HC_ACTION && pThis && wParam && pThis->m_Sets.iHdrCurveTuneKey
+			&& (int)wParam == (pThis->m_Sets.iHdrCurveTuneKey & 0xFF)) {
+		GUITHREADINFO gui = { sizeof(gui) };
+		if (!(GetGUIThreadInfo(GetCurrentThreadId(), &gui) && gui.hwndCaret)) {
+			const int held = (GetKeyState(VK_SHIFT) < 0 ? PRESETKEY_Shift : 0)
+			               | (GetKeyState(VK_CONTROL) < 0 ? PRESETKEY_Ctrl : 0)
+			               | (GetKeyState(VK_MENU) < 0 ? PRESETKEY_Alt : 0);
+			if (((int)wParam | held) == pThis->m_Sets.iHdrCurveTuneKey) {
+				const bool bKeyUp = (lParam & 0x80000000) != 0;
+				const bool bRepeat = (lParam & 0x40000000) != 0;
+				if (!bKeyUp && !bRepeat) {
+					pThis->StartHdrTune(1);
+				}
+				return 1;
+			}
+		}
+	}
+
 	if (code == HC_ACTION && pThis && pThis->m_Sets.iDlssNRToggleKey
 			&& (int)wParam == pThis->m_Sets.iDlssNRToggleKey) {
 		const bool bKeyUp = (lParam & 0x80000000) != 0;
@@ -721,20 +806,16 @@ void CMpcVideoRenderer::RecallPreset(int slot)
 	// one -- or none, or the wrong one, as the redraws fell.
 	wchar_t name[64] = {};
 	GetPresetInfo(slot, name, (int)std::size(name), nullptr);
-	m_VideoProcessor->ShowNotice(name[0] ? std::format(L"Preset {}: {}", slot + 1, name)
-	                                     : std::format(L"Preset {}", slot + 1));
+	// Under the renderer's lock, with its timer to take it down (PostNotice): the HDR curve's
+	// tune posts notices from a thread of its own.
+	PostNotice(name[0] ? std::format(L"Preset {}: {}", slot + 1, name) : std::format(L"Preset {}", slot + 1), 2500, false);
 	SetSettings(sets);
 	SaveSettings();
 
-	// Paused, nothing draws the name unless asked, and nothing takes it down either.
+	// Paused, nothing draws the name unless asked.
 	if (m_filterState != State_Running) {
 		Redraw();
 	}
-	if (m_hNoticeTimer) {
-		DeleteTimerQueueTimer(nullptr, m_hNoticeTimer, INVALID_HANDLE_VALUE);
-		m_hNoticeTimer = nullptr;
-	}
-	CreateTimerQueueTimer(&m_hNoticeTimer, nullptr, NoticeTimerProc, this, 2600, 0, WT_EXECUTEONLYONCE);
 }
 
 void CALLBACK CMpcVideoRenderer::NoticeTimerProc(void* pParam, BOOLEAN)
@@ -824,7 +905,7 @@ STDMETHODIMP CMpcVideoRenderer::SetPresetInfo(int slot, LPCWSTR name, int vk)
 
 void CMpcVideoRenderer::InstallToggleKeyHook()
 {
-	bool bAnyKey = m_Sets.iDlssNRToggleKey != 0;
+	bool bAnyKey = m_Sets.iDlssNRToggleKey != 0 || m_Sets.iHdrCurveTuneKey != 0;
 	for (const int vk : m_presetKeys) {
 		bAnyKey = bAnyKey || vk != 0;
 	}
@@ -875,6 +956,12 @@ CMpcVideoRenderer::~CMpcVideoRenderer()
 	DLog(L"CMpcVideoRenderer::~CMpcVideoRenderer()");
 
 	RemoveToggleKeyHook();
+	// The HDR curve's tune holds the filter while it runs: by the time this runs, its worker
+	// has let it go and touches nothing of it again.
+	if (m_hHdrTuneThread) {
+		CloseHandle(m_hHdrTuneThread);
+		m_hHdrTuneThread = nullptr;
+	}
 	if (m_hNoticeTimer) {
 		// Waits for a callback that is running: it must not outlive what it draws with.
 		DeleteTimerQueueTimer(nullptr, m_hNoticeTimer, INVALID_HANDLE_VALUE);
@@ -924,6 +1011,9 @@ HRESULT CMpcVideoRenderer::EndFlush()
 	HRESULT hr = __super::EndFlush();
 
 	m_bFlushing = false;
+	// The HDR curve's tune waits for a picture from after its seek: one that comes once this
+	// count has moved.
+	m_nFlushGen++;
 
 	return hr;
 }
@@ -1480,6 +1570,12 @@ STDMETHODIMP CMpcVideoRenderer::Run(REFERENCE_TIME rtStart)
 {
 	DLog(L"CMpcVideoRenderer::Run()");
 
+	// The player plays again while the HDR curve's tune moves the film: the tune stops
+	// there and puts the film back where it was. Its own Run comes after its scan.
+	if (m_HdrTune.Sampling()) {
+		m_HdrTune.Abort(CHdrTuneProbe::ExternalRun);
+	}
+
 	if (m_State == State_Running) {
 		return NOERROR;
 	}
@@ -1505,6 +1601,11 @@ STDMETHODIMP CMpcVideoRenderer::Stop()
 {
 	DLog(L"CMpcVideoRenderer::Stop()");
 
+	// The film stopped, or the player closing it: the HDR curve's tune asks nothing more of
+	// the graph. Never waited for here: the graph calls this holding its own lock, which a
+	// seek of the tune's may be waiting on.
+	m_HdrTune.Abort(CHdrTuneProbe::Stopped);
+
 	m_filterState = State_Stopped;
 	m_bValidBuffer = false;
 
@@ -1514,6 +1615,14 @@ STDMETHODIMP CMpcVideoRenderer::Stop()
 	}
 
 	return CBaseVideoRenderer2::Stop();
+}
+
+STDMETHODIMP CMpcVideoRenderer::JoinFilterGraph(IFilterGraph* pGraph, LPCWSTR pName)
+{
+	if (!pGraph) {
+		m_HdrTune.Abort(CHdrTuneProbe::Removed);
+	}
+	return __super::JoinFilterGraph(pGraph, pName);
 }
 
 #if _DEBUG
@@ -1816,14 +1925,18 @@ static const UINT WM_VR_REMAKE = WM_APP + 0x3A1;
 // hides the pointer after two seconds. A replacement made enabled took the mouse for
 // itself, and the pointer stayed over the film until it was closed -- upstream's fault
 // too, with any setting that has the window made again, the HDR output list first among them.
-HWND CMpcVideoRenderer::CreateVideoWindow(const bool bDisabled)
+//
+// Made where it goes, so that a window made on another thread than Init's need not be
+// placed from Init's, which would wait for that thread (Init, below). A child window
+// given CW_USEDEFAULT is at 0, 0 with no size, which an empty place is too.
+HWND CMpcVideoRenderer::CreateVideoWindow(const bool bDisabled, const RECT& place, const bool bQuiet)
 {
 	return CreateWindowExW(
-		0,
+		bQuiet ? WS_EX_NOPARENTNOTIFY : 0,
 		g_szClassName,
 		nullptr,
 		WS_VISIBLE | WS_CHILDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | (bDisabled ? WS_DISABLED : 0),
-		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+		place.left, place.top, place.right - place.left, place.bottom - place.top,
 		m_hWndParent,
 		nullptr,
 		g_hInst,
@@ -1884,19 +1997,51 @@ HRESULT CMpcVideoRenderer::Init(const bool bCreateWindow/* = false*/)
 			// mouse leaving its video area, is then told the pointer has left while
 			// it sits on the picture -- and never hides it again. If that thread does
 			// not answer, the window is made here as it always was.
+			//
+			// That thread may be waiting for the renderer's lock, which this one holds:
+			// asking for the statistics, or for anything else, while the setting is
+			// applied from another thread. It then answers nothing, and anything sent to
+			// it for this one to go on waits for good -- the bench reading the statistics
+			// from the window's thread hung there every time a frame generator's swap
+			// chain made the setting slow enough (playback_test --rewindow). So only the
+			// request is sent, with its time limit: should the thread take it after that,
+			// it closes what it made (OnReceiveMessage). The old window is let go of and
+			// closed by a message posted, not sent; and the new one is made where it goes
+			// (CreateVideoWindow), not placed from here.
 			const bool bDisabled = hWndOld && !IsWindowEnabled(hWndOld);
+			m_remakePlace = m_windowRect;
+			bool bUnanswered = false;
 			if (hWndOld && GetWindowThreadProcessId(hWndOld, nullptr) != GetCurrentThreadId()) {
+				m_hWndRemade = nullptr;
+				m_remakeState = RemakeWaiting;
 				DWORD_PTR made = 0;
-				if (SendMessageTimeoutW(hWndOld, WM_VR_REMAKE, bDisabled, 0, SMTO_ABORTIFHUNG, 2000, &made)) {
-					m_hWndWindow = reinterpret_cast<HWND>(made);
+				SendMessageTimeoutW(hWndOld, WM_VR_REMAKE, bDisabled, 0, SMTO_ABORTIFHUNG, 2000, &made);
+				int waiting = RemakeWaiting;
+				if (!m_remakeState.compare_exchange_strong(waiting, RemakeIdle)) {
+					// Taken: made, even when the answer came too late to be read.
+					m_hWndWindow = m_hWndRemade.exchange(nullptr);
 				}
-				DLogIf(!m_hWndWindow, L"CMpcVideoRenderer::Init() : the window's thread did not make the new one");
-			}
-			if (hWndOld) {
+				m_remakeState = RemakeIdle;
+				bUnanswered = !m_hWndWindow;
+				DLogIf(bUnanswered, L"CMpcVideoRenderer::Init() : the window's thread did not make the new one");
+				// What reaches it from now on goes to DefWindowProc: a message taken after
+				// this filter is gone would otherwise reach the filter.
+				SetWindowLongPtrW(hWndOld, 0, 0);
+				PostMessageW(hWndOld, WM_CLOSE, 0, 0);
+			} else if (hWndOld) {
 				::SendMessageW(hWndOld, WM_CLOSE, 0, 0);
 			}
 			if (!m_hWndWindow) {
-				m_hWndWindow = CreateVideoWindow(bDisabled);
+				// Made here because the window's thread did not answer, a child window
+				// announces itself to its parent and waits for the parent's thread to take
+				// it, which may be the thread that did not answer -- in the bench its window
+				// holds the video window -- or one that let the window go with it: that wait
+				// was for good too. So it is not announced to a parent of another thread.
+				// In MPC-HC the parent is the interface thread's, which is the one applying
+				// the setting, and nothing changes; nor for a window made any other way.
+				const bool bQuiet = bUnanswered && m_hWndParent
+					&& GetWindowThreadProcessId(m_hWndParent, nullptr) != GetCurrentThreadId();
+				m_hWndWindow = CreateVideoWindow(bDisabled, m_remakePlace, bQuiet);
 			}
 
 			if (!m_hWndWindow) {
@@ -1905,7 +2050,7 @@ HRESULT CMpcVideoRenderer::Init(const bool bCreateWindow/* = false*/)
 				return E_FAIL;
 			}
 
-			if (!m_windowRect.IsRectNull()) {
+			if (!m_windowRect.IsRectNull() && GetWindowThreadProcessId(m_hWndWindow, nullptr) == GetCurrentThreadId()) {
 				SetWindowPos(m_hWndWindow, nullptr, m_windowRect.left, m_windowRect.top, m_windowRect.Width(), m_windowRect.Height(), SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW);
 			}
 		} else if (hWndOld) {
@@ -2127,8 +2272,9 @@ STDMETHODIMP CMpcVideoRenderer::SaveSettings()
 	CRegKey key;
 	if (ERROR_SUCCESS == key.Create(HKEY_CURRENT_USER, OPT_REGKEY_VIDEORENDERER)) {
 		WriteSettings(key, m_Sets);
-		// Here and not in WriteSettings, which writes the presets too: none carries it.
+		// Here and not in WriteSettings, which writes the presets too: none carries them.
 		key.SetDWORDValue(OPT_SdrPeakSceneCuts, m_Sets.bSdrPeakSceneCuts);
+		key.SetDWORDValue(OPT_HdrCurveTuneKey, m_Sets.iHdrCurveTuneKey);
 	}
 
 	return S_OK;
@@ -2202,6 +2348,12 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetInt(LPCSTR field, int* value)
 		*value = m_filterState;
 		return S_OK;
 	}
+	// 1 while the HDR curve's tune runs.
+	if (!strcmp(field, "hdrCurveTune")) {
+		CAutoLock lock(&m_HdrTuneLock);
+		*value = m_hHdrTuneThread && WaitForSingleObject(m_hHdrTuneThread, 0) == WAIT_TIMEOUT;
+		return S_OK;
+	}
 	if (!strcmp(field, "rotation")) {
 		*value = m_VideoProcessor->GetRotation();
 		return S_OK;
@@ -2247,10 +2399,15 @@ STDMETHODIMP CMpcVideoRenderer::Flt_GetString(LPCSTR field, LPWSTR* value, unsig
 	const bool bStats = !strcmp(field, "statsText");
 	const bool bLogo = !strcmp(field, "logoStatus");
 	const bool bLogoList = !strcmp(field, "logoList");
-	if (bNR || bSR || bStats || bLogo || bLogoList) {
+	// "hdrCurveTuneReport": what the HDR curve's last tune did, a line a place it visited.
+	const bool bTune = !strcmp(field, "hdrCurveTuneReport");
+	if (bNR || bSR || bStats || bLogo || bLogoList || bTune) {
 		CAutoLock cRendererLock(&m_RendererLock);
 		std::wstring str;
-		if (m_VideoProcessor) {
+		if (bTune) {
+			CAutoLock lock(&m_HdrTuneLock);
+			str = m_strHdrTuneReport;
+		} else if (m_VideoProcessor) {
 			str = bLogoList ? m_VideoProcessor->GetLogoList()
 				: bLogo ? m_VideoProcessor->GetLogoStatus()
 				: bStats ? m_VideoProcessor->GetStatsText()
@@ -2411,6 +2568,12 @@ STDMETHODIMP CMpcVideoRenderer::Flt_SetInt(LPCSTR field, int value)
 			m_VideoProcessor->SetStereo3dTransform(value);
 			return S_OK;
 		}
+	}
+
+	// The HDR curve's tune, as its key starts it: 1 tunes the curve and keeps it, 2 scans and
+	// reports only, 0 stops a scan under way.
+	if (!strcmp(field, "cmd_hdrCurveTune")) {
+		return StartHdrTune(value);
 	}
 
 	// A logo of the settings page's list taken at once, as its buttons act: the i-th of
@@ -2736,7 +2899,22 @@ void CMpcVideoRenderer::DoAfterChangingDevice()
 LRESULT CMpcVideoRenderer::OnReceiveMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
 	if (uMsg == WM_VR_REMAKE) {
-		return reinterpret_cast<LRESULT>(CreateVideoWindow(wParam != 0));
+		// Init is waiting for it, or was: made, then claimed, and closed again when Init
+		// has given up meanwhile and made its own.
+		if (m_remakeState != RemakeWaiting) {
+			return 0;
+		}
+		const HWND hWnd = CreateVideoWindow(wParam != 0, m_remakePlace);
+		m_hWndRemade = hWnd;
+		int waiting = RemakeWaiting;
+		if (!m_remakeState.compare_exchange_strong(waiting, RemakeTaken)) {
+			m_hWndRemade = nullptr;
+			if (hWnd) {
+				DestroyWindow(hWnd);
+			}
+			return 0;
+		}
+		return reinterpret_cast<LRESULT>(hWnd);
 	}
 
 	if (m_hWndDrain && !InSendMessage() && !m_bExclusiveScreen) {

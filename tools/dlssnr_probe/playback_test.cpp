@@ -58,6 +58,9 @@
 //   playback_test.exe --file <film> --peakcuts 0|1   the measured peak's window starts over at a
 //                                     scene cut (SdrPeakSceneCuts); with MPCVR_PACING_TRACE,
 //                                     pacing_report.py --peak says how the peak followed each cut
+//   playback_test.exe --file <film> --hdrcurve N   the HDR curve with preset N (1..6): its step in
+//                                     the statistics, and the same paused picture read off an HDR
+//                                     desktop with it and without it (shadows, mid tones, peak)
 
 #include <windows.h>
 #include <VersionHelpers.h>
@@ -75,9 +78,14 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <numeric>
+#include <functional>
+#include <tlhelp32.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include "../../Source/SettingsPage/Greying.h"
+#include "../../Source/HdrCurve.h"
+#include "../../Source/HdrCurveTune.h"
 #include <map>
 #include <thread>
 #include <vector>
@@ -149,6 +157,10 @@ static int g_filmToSdr = -1;      // --tosdr 0|1
 static int g_filmPreferDovi = -1; // --prefdovi 0|1
 static int g_filmCadence = -1;    // --cadence 0..2: where the cadence slips go (CADENCE_SLIPS_*)
 static int g_filmPeakCuts = -1;   // --peakcuts 0|1: the measured peak starts over at a cut
+// --hdrcurve N: the HDR curve with preset N (HdrCurve.h, 1..6) at 100 %; without it the curve
+// is off, whatever the registry holds. With --file, the same paused picture is read off the
+// desktop with the curve and without it.
+static int g_filmHdrCurve = 0;
 // --asis: leave the settings exactly as the registry has them. The only way to drive a
 // renderer this bench did not build: Settings_t has grown fields since, so SetSettings
 // on the stock filter writes a layout it does not know and it ignores the lot. Each
@@ -162,7 +174,10 @@ static double g_filmSeek = 0;          // --seek <seconds>: where to start in it
 static int g_frameSeconds = 0;         // --frame N: the page inside a real property frame
 static bool g_bThemedHost = false;     // --themed: and a player that paints it
 static bool g_bDlaa = false;           // --dlaa: let DLSS SR run without enlarging
+static bool g_bDlaaAfter = false;      // --dlaaafter: DLSS's DLAA after whoever resized, DLSS SR off
+static bool g_bDlaaAfterNR = false;    // --dlaaafternr: and after DLSS 5 NR where that runs after the upscaling
 static bool g_bAfterNR = false;        // --afternr: who enlarges what DLSS 5 NR leaves, on a real film (--file)
+static bool g_bNRAfter = false;        // --nrafter: DLSS 5 NR applied after the upscaling, the processor's one turn enlarging
 static bool g_bVPTurns = false;        // --vpturns: who enlarges, without DLSS, the desktop read unclipped (--file)
 static bool g_bAfterGrab = false;      // --aftergrab: the screen on the same paused picture before and after a snapshot (--file)
 static bool g_bLogo = false;           // --logo: the channel's logo found and hidden on a real film (--file)
@@ -215,6 +230,9 @@ static bool SetDisplayHz(int hz)
 static bool g_bGreying = false;        // --greying: the rules alone, without a film
 static std::vector<int> g_hoverIds;     // --hover <id>: put the pointer on it and read the tip
 static int g_pageSection = -1;         // --section N: which one to show, or the page's own choice
+// --typenits N: N typed into the HDR curve tab's display peak, which must reach the HDR tab's
+// Nits, and the roll-off's start it shows then read back. Nothing is applied.
+static int g_typeNits = 0;
 static bool g_bPageApply = false;      // --apply: press Apply before closing it
 // The picture is fed as NV12 wherever the hardware video processor has to be able
 // to take it; elsewhere RGB32 keeps the film exact.
@@ -870,6 +888,30 @@ static std::wstring StepLine(const std::wstring& text, const wchar_t* name, doub
 	return {};
 }
 
+// The number the statistics give a step of the pipeline, which is its place in the order
+// the picture goes through them; -1 for none.
+static int StepNumber(const std::wstring& text, const wchar_t* name)
+{
+	const size_t nameLength = wcslen(name);
+	for (size_t pos = 0; pos < text.size();) {
+		size_t end = text.find(L'\n', pos);
+		if (end == std::wstring::npos) {
+			end = text.size();
+		}
+		const std::wstring line = text.substr(pos, end - pos);
+		pos = end + 1;
+		size_t i = 0;
+		while (i < line.size() && iswdigit(line[i])) {
+			i++;
+		}
+		if (i && i < line.size() && line[i] == L' ' && !line.compare(i + 1, nameLength, name)
+				&& (i + 1 + nameLength == line.size() || line[i + 1 + nameLength] == L' ' || line[i + 1 + nameLength] == L':')) {
+			return _wtoi(line.c_str());
+		}
+	}
+	return -1;
+}
+
 static double StepMs(const std::wstring& text, const wchar_t* name)
 {
 	double ms = -1;
@@ -1001,6 +1043,10 @@ struct Result {
 	DXGI_FORMAT stillFormat = DXGI_FORMAT_UNKNOWN;  // what the desktop frame came in
 	double stopSeconds[3] = {};
 	bool bSnapshotChanged = false;  // --aftergrab: the screen was not the same after a snapshot
+	int curveFailures = 0;          // --hdrcurve: what the curve did on the screen, against what it is for
+	int tuneFailures = 0;           // --hdrtune and its kin: what the curve's tune did, against what it is for
+	bool bTuneOnly = false;         // the run was the tune's alone: nothing else to judge
+	bool bTuneStopped = false;      // --stopat: the graph let go while the tune ran, its thread to be looked for after
 	std::string error;
 };
 
@@ -1161,11 +1207,12 @@ static bool ParseSkipped(const std::wstring& text, int& frames, int& skipped)
 		&frames, &skipped, &dropped2, &failed) >= 2;
 }
 
-// The pictures not ready in time, at the end of the Render ahead line; 0 when there is none.
+// The pictures the GPU was still finishing when Present was called, at the end of the
+// Render ahead line; 0 when there is none.
 static int ParseLate(const std::wstring& text)
 {
 	const std::wstring line = StatsLine(text, L"Render ahead  : ");
-	const size_t pos = line.rfind(L" not in time");
+	const size_t pos = line.rfind(L" after Present");
 	if (pos == std::wstring::npos) {
 		return 0;
 	}
@@ -1174,6 +1221,393 @@ static int ParseLate(const std::wstring& text)
 }
 
 #include "file_graph.inl"
+
+// --seektime N: what a seek costs while the film is paused, N of them spread over the film
+// as the HDR curve's tune spreads them, exact and to the key frame. Each is timed in three
+// parts: SetPositions returning, the graph saying it is paused again (the decoder has a
+// picture for the renderer), and the renderer counting one more picture received. The
+// position it started from is put back, and the film plays again, at the end.
+static int g_seekTime = 0;
+
+static double SinceMs(const LARGE_INTEGER& from)
+{
+	LARGE_INTEGER now, freq;
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&freq);
+	return (now.QuadPart - from.QuadPart) * 1000.0 / freq.QuadPart;
+}
+
+static void ReportSeekTime(IFilterGraph2* pGraph, IBaseFilter* pRenderer, int count)
+{
+	CComQIPtr<IMediaSeeking> pMS(pGraph);
+	CComQIPtr<IMediaControl> pMC(pGraph);
+	if (!pMS || !pMC) {
+		printf("-- paused seeks: the graph has no IMediaSeeking\n");
+		return;
+	}
+	LONGLONG duration = 0;
+	DWORD caps = 0;
+	GUID format = {};
+	pMS->GetDuration(&duration);
+	pMS->GetCapabilities(&caps);
+	pMS->GetTimeFormat(&format);
+	printf("\n-- paused seeks, %d over the film\n", count);
+	printf("   duration %.1f s, media time %s, capabilities 0x%04X\n", duration / 1e7,
+		format == TIME_FORMAT_MEDIA_TIME ? "yes" : "no", (unsigned)caps);
+
+	pMC->Pause();
+	OAFilterState state = State_Stopped;
+	pMC->GetState(5000, &state);
+	Pump(300);
+	LONGLONG start = 0;
+	pMS->GetCurrentPosition(&start);
+
+	const auto Frames = [&]() {
+		int frames = -1, skipped = 0;
+		ParseSkipped(StatsText(pRenderer), frames, skipped);
+		return frames;
+	};
+
+	for (const bool bKey : { false, true }) {
+		std::vector<double> totals;
+		int missed = 0;
+		printf("   %s:\n", bKey ? "to the key frame" : "exact");
+		for (int i = 0; i < count; i++) {
+			LONGLONG target = (LONGLONG)(duration * (0.04 + 0.88 * (i + 0.5) / count));
+			const int before = Frames();
+			LARGE_INTEGER t0;
+			QueryPerformanceCounter(&t0);
+			const HRESULT hrSeek = pMS->SetPositions(&target,
+				AM_SEEKING_AbsolutePositioning | (bKey ? AM_SEEKING_SeekToKeyFrame : 0), nullptr, AM_SEEKING_NoPositioning);
+			const double seekMs = SinceMs(t0);
+			const HRESULT hrState = pMC->GetState(5000, &state);
+			const double stateMs = SinceMs(t0);
+			double pictureMs = -1;
+			while (SinceMs(t0) < 5000) {
+				Pump(2);
+				if (Frames() != before) {
+					pictureMs = SinceMs(t0);
+					break;
+				}
+			}
+			LONGLONG now = 0;
+			pMS->GetCurrentPosition(&now);
+			printf("   %2d  %7.1f s  SetPositions %5.0f ms (0x%08X), paused %5.0f ms (0x%08X), picture %5.0f ms, position %+.2f s\n",
+				i + 1, target / 1e7, seekMs, (unsigned)hrSeek, stateMs, (unsigned)hrState, pictureMs, (now - target) / 1e7);
+			if (pictureMs < 0) {
+				missed++;
+			} else {
+				totals.push_back(pictureMs);
+			}
+		}
+		std::sort(totals.begin(), totals.end());
+		const double sum = std::accumulate(totals.begin(), totals.end(), 0.0);
+		printf("   %s: %d pictures, %d missed, total %.0f ms, median %.0f, p95 %.0f, max %.0f\n",
+			bKey ? "to the key frame" : "exact", (int)totals.size(), missed, sum,
+			totals.empty() ? 0.0 : totals[totals.size() / 2],
+			totals.empty() ? 0.0 : totals[std::min(totals.size() - 1, (size_t)std::ceil(totals.size() * 0.95) - 1)],
+			totals.empty() ? 0.0 : totals.back());
+	}
+
+	LARGE_INTEGER t0;
+	QueryPerformanceCounter(&t0);
+	pMS->SetPositions(&start, AM_SEEKING_AbsolutePositioning, nullptr, AM_SEEKING_NoPositioning);
+	pMC->GetState(5000, &state);
+	printf("   back to %.2f s in %.0f ms\n", start / 1e7, SinceMs(t0));
+	pMC->Run();
+	Pump(500);
+}
+
+// --hdrtune: the HDR curve's tune, started as its key starts it, on the film playing. Then
+// again, measuring only, to see the same values: the tune measures before the curve. Checked:
+// within 30 s, twelve places of sixteen at least, the film back on its picture and playing,
+// the values the curve's Custom ones, at full strength, in the filter and in the registry.
+// --hdrtunescan: measuring only, once, for the targets (hdr_tune_targets.py reads its report).
+// --cancelat S, --playat S, --stopat S: its key pressed again, the player's Play, the player's
+// Stop at S seconds into it; after Stop the graph is let go at once and the tune's thread
+// must be gone a few seconds later. The registry key's values are put back as they were:
+// a tune keeps what it found with SaveSettings, which writes every setting in force.
+static int g_hdrTune = 0;
+static double g_hdrTuneCancelAt = 0, g_hdrTunePlayAt = 0, g_hdrTuneStopAt = 0;
+// --bykey: the tune started by its key, Ctrl+F9 bound for the run and pressed with SendInput,
+// the window in front: the hook reads real keys only.
+static bool g_bHdrTuneByKey = false;
+static const wchar_t* kPlusKey = L"Software\\MPC-BE Filters\\MPC Video Renderer Plus";
+
+struct RegValue {
+	std::wstring name;
+	DWORD type = 0;
+	std::vector<BYTE> data;
+};
+
+static std::vector<RegValue> g_tuneSavedKey;   // --stopat: put back once the tune is gone
+
+static std::vector<RegValue> ReadKeyValues(const wchar_t* path)
+{
+	std::vector<RegValue> values;
+	HKEY key = nullptr;
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+		return values;
+	}
+	for (DWORD i = 0;; i++) {
+		wchar_t name[256];
+		DWORD nameLen = (DWORD)std::size(name), type = 0, size = 0;
+		if (RegEnumValueW(key, i, name, &nameLen, nullptr, &type, nullptr, &size) != ERROR_SUCCESS) {
+			break;
+		}
+		RegValue v{ name, type, std::vector<BYTE>(size) };
+		nameLen = (DWORD)std::size(name);
+		RegEnumValueW(key, i, name, &nameLen, nullptr, &type, v.data.data(), &size);
+		values.push_back(std::move(v));
+	}
+	RegCloseKey(key);
+	return values;
+}
+
+static void WriteKeyValues(const wchar_t* path, const std::vector<RegValue>& values)
+{
+	HKEY key = nullptr;
+	if (RegOpenKeyExW(HKEY_CURRENT_USER, path, 0, KEY_READ | KEY_WRITE, &key) != ERROR_SUCCESS) {
+		return;
+	}
+	for (const RegValue& now : ReadKeyValues(path)) {
+		if (std::none_of(values.begin(), values.end(), [&](const RegValue& v) { return v.name == now.name; })) {
+			RegDeleteValueW(key, now.name.c_str());
+		}
+	}
+	for (const RegValue& v : values) {
+		RegSetValueExW(key, v.name.c_str(), 0, v.type, v.data.data(), (DWORD)v.data.size());
+	}
+	RegCloseKey(key);
+}
+
+static DWORD KeyDword(const std::vector<RegValue>& values, const wchar_t* name, DWORD missing = 0xFFFFFFFF)
+{
+	for (const RegValue& v : values) {
+		if (v.name == name && v.type == REG_DWORD && v.data.size() == 4) {
+			return *(const DWORD*)v.data.data();
+		}
+	}
+	return missing;
+}
+
+static std::wstring TuneReport(IBaseFilter* pRenderer)
+{
+	std::wstring text;
+	if (CComQIPtr<IExFilterConfig> pConfig{ pRenderer }) {
+		LPWSTR pstr = nullptr;
+		if (S_OK == pConfig->Flt_GetString("hdrCurveTuneReport", &pstr, nullptr) && pstr) {
+			text = pstr;
+			CoTaskMemFree(pstr);
+		}
+	}
+	return text;
+}
+
+// The line of the report holding `what`, without it.
+static std::wstring TuneLine(const std::wstring& report, const wchar_t* what)
+{
+	const size_t at = report.find(what);
+	if (at == std::wstring::npos) {
+		return {};
+	}
+	const size_t start = report.rfind(L'\n', at);
+	const size_t end = report.find(L'\n', at);
+	return report.substr(start == std::wstring::npos ? 0 : start + 1, (end == std::wstring::npos ? report.size() : end) - (start == std::wstring::npos ? 0 : start + 1));
+}
+
+// Ctrl+F9 pressed as a user presses it, the window brought to the front first: what has the
+// focus gets the key, and the hook is on the thread of the window's owner.
+static bool PressCtrlF9(HWND hwnd)
+{
+	SetForegroundWindow(hwnd);
+	BringWindowToTop(hwnd);
+	Pump(300);
+	if (GetForegroundWindow() != hwnd) {
+		printf("   the window is not in front: the key would go elsewhere\n");
+		return false;
+	}
+	INPUT in[4] = {};
+	for (INPUT& i : in) {
+		i.type = INPUT_KEYBOARD;
+	}
+	in[0].ki.wVk = VK_CONTROL;
+	in[1].ki.wVk = VK_F9;
+	in[2].ki.wVk = VK_F9;
+	in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+	in[3].ki.wVk = VK_CONTROL;
+	in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+	return SendInput(4, in, sizeof(INPUT)) == 4;
+}
+
+// The tune started as its key starts it, and waited for, the window's messages pumped; at
+// `at` seconds into it, `then`. With hwnd, by the key itself. Returns how long it ran, in seconds.
+static double RunTune(IBaseFilter* pRenderer, int mode, double at = 0, const std::function<void()>& then = {}, HWND byKey = nullptr)
+{
+	CComQIPtr<IExFilterConfig> pConfig{ pRenderer };
+	LARGE_INTEGER t0;
+	QueryPerformanceCounter(&t0);
+	if (byKey) {
+		if (!pConfig || !PressCtrlF9(byKey)) {
+			printf("   the key could not be pressed\n");
+			return 0;
+		}
+		// Up to a second for the hook to have it.
+		int running = 0;
+		for (int i = 0; i < 20 && !running; i++) {
+			Pump(50);
+			pConfig->Flt_GetInt("hdrCurveTune", &running);
+		}
+		if (!running) {
+			printf("   the key did not start the tune\n");
+			return 0;
+		}
+	} else {
+		const HRESULT hr = pConfig ? pConfig->Flt_SetInt("cmd_hdrCurveTune", mode) : E_NOINTERFACE;
+		if (FAILED(hr)) {
+			printf("   the tune did not start (0x%08X)\n", (unsigned)hr);
+			return 0;
+		}
+	}
+	bool bFired = false;
+	while (SinceMs(t0) < 45000) {
+		Pump(50);
+		if (!bFired && at > 0 && SinceMs(t0) >= at * 1000) {
+			bFired = true;
+			if (then) {
+				then();
+			}
+		}
+		int running = 0;
+		pConfig->Flt_GetInt("hdrCurveTune", &running);
+		if (!running) {
+			break;
+		}
+	}
+	return SinceMs(t0) / 1000.0;
+}
+
+static void PrintTuneReport(const std::wstring& report)
+{
+	size_t start = 0;
+	while (start < report.size()) {
+		const size_t end = report.find(L'\n', start);
+		wprintf(L"   | %s\n", report.substr(start, (end == std::wstring::npos ? report.size() : end) - start).c_str());
+		if (end == std::wstring::npos) {
+			break;
+		}
+		start = end + 1;
+	}
+}
+
+// How many threads of this process still carry the tune's name: 0 once it has ended.
+static int TuneThreadLeft()
+{
+	using PFN_GetThreadDescription = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+	const auto pfn = (PFN_GetThreadDescription)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
+	if (!pfn) {
+		printf("   the tune's thread: cannot be looked for on this Windows\n");
+		return 0;
+	}
+	int left = -1;
+	for (int attempt = 0; attempt < 50 && left; attempt++) {
+		if (attempt) {
+			Pump(100);
+		}
+		left = 0;
+		const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		THREADENTRY32 te = { sizeof(te) };
+		for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+			if (te.th32OwnerProcessID != GetCurrentProcessId()) {
+				continue;
+			}
+			const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+			PWSTR name = nullptr;
+			if (h && SUCCEEDED(pfn(h, &name)) && name) {
+				left += !wcscmp(name, L"MPCVR HDR curve tune");
+				LocalFree(name);
+			}
+			if (h) {
+				CloseHandle(h);
+			}
+		}
+		CloseHandle(snap);
+	}
+	printf("   the tune's thread, 5 s after the graph was let go: %s\n", left ? "STILL THERE" : "gone");
+	if (left) {
+		printf("   FAIL: the tune's thread outlived the graph\n");
+	}
+	return left ? 1 : 0;
+}
+
+// The curve's values in the registry as they were before the tune.
+static bool CurveKeyUnchanged(const std::vector<RegValue>& savedKey)
+{
+	const std::vector<RegValue> key = ReadKeyValues(kPlusKey);
+	const wchar_t* names[] = { L"HdrCurve", L"HdrCurvePreset", L"HdrCurveStrength", L"HdrCurveShadowLift", L"HdrCurveShadowRange",
+		L"HdrCurveMidGrey", L"HdrCurveHighlightStart", L"HdrCurveRollOff", L"HdrCurvePeakCap" };
+	bool bSame = true;
+	for (const wchar_t* n : names) {
+		bSame &= KeyDword(key, n) == KeyDword(savedKey, n);
+	}
+	printf("   the curve in the registry: %s\n", bSame ? "as it was" : "CHANGED");
+	return bSame;
+}
+
+// The checks of a tune that ran to its end, on the film that was playing.
+static int CheckTune(const std::wstring& report, double seconds, IMediaControl* pMC, bool bKept,
+                     IVideoRenderer* pVR, const std::vector<RegValue>& savedKey)
+{
+	int failures = 0;
+	int measured = 0, places = 0, misses = 0;
+	swscanf_s(TuneLine(report, L" places measured").c_str(), L"%d of %d places measured, %d", &measured, &places, &misses);
+	double backSec = 0, delta = 1e9;
+	swscanf_s(TuneLine(report, L"back at ").c_str(), L"back at %lf s, %lf", &backSec, &delta);
+	OAFilterState state = State_Stopped;
+	pMC->GetState(2000, &state);
+	printf("   %.1f s, %d of %d places measured, back %+.3f s from its picture, %s\n", seconds, measured, places, delta,
+		state == State_Running ? "playing" : state == State_Paused ? "paused" : "stopped");
+	if (seconds > 30.0) {
+		printf("   FAIL: the tune took more than 30 s\n");
+		failures++;
+	}
+	if (measured < 12) {
+		printf("   FAIL: fewer than 12 places measured\n");
+		failures++;
+	}
+	if (std::abs(delta) > 0.05) {
+		printf("   FAIL: the film is not back on its picture\n");
+		failures++;
+	}
+	if (state != State_Running) {
+		printf("   FAIL: the film does not play again\n");
+		failures++;
+	}
+	if (bKept) {
+		Settings_t s;
+		pVR->GetSettings(s);
+		const std::wstring values = TuneLine(report, L"values: ");
+		const HdrCurve::Values v = HdrCurve::ValuesOf(s);
+		const std::vector<RegValue> key = ReadKeyValues(kPlusKey);
+		const bool bFilter = s.bHdrCurve && s.iHdrCurvePreset == HdrCurve::Custom && s.iHdrCurveStrength == 100
+			&& values.find(L"values: " + HdrCurveTune::Describe(v)) == 0;
+		const bool bRegistry = KeyDword(key, L"HdrCurve") == 1 && KeyDword(key, L"HdrCurvePreset") == HdrCurve::Custom
+			&& KeyDword(key, L"HdrCurveStrength") == 100 && (int)KeyDword(key, L"HdrCurveShadowLift") == v.liftEv100
+			&& (int)KeyDword(key, L"HdrCurveMidGrey") == v.midGreyNits && (int)KeyDword(key, L"HdrCurveHighlightStart") == v.startNits
+			&& (int)KeyDword(key, L"HdrCurvePeakCap") == v.capNits && (int)KeyDword(key, L"HdrCurveRollOff") == v.rollOffPercent
+			&& (int)KeyDword(key, L"HdrCurveShadowRange") == v.rangeNits;
+		wprintf(L"   kept         : %s, in the filter %s, in the registry %s\n", HdrCurveTune::Describe(v).c_str(),
+			bFilter ? L"yes" : L"NO", bRegistry ? L"yes" : L"NO");
+		if (!bFilter || !bRegistry) {
+			printf("   FAIL: the tuned values are not the curve's Custom ones, at full strength, in the filter and the registry\n");
+			failures++;
+		}
+	} else if (!CurveKeyUnchanged(savedKey)) {
+		printf("   FAIL: a tune that kept nothing changed the registry\n");
+		failures++;
+	}
+	return failures;
+}
 
 // --vpuse: what the hardware video processor is really doing with the film at hand,
 // and what the page would therefore grey. The settings that grey each other are
@@ -1367,6 +1801,86 @@ static int ShowGreying()
 		: "The cleaning steps aside for Super Resolution chosen and live, and for nothing else; the\n"
 		  "logo's hiding stays live with it.");
 	wrong += wrongClean;
+
+	// DLSS's DLAA after scaling against DLSS Super Resolution: one or the other, DLSS SR
+	// winning when the two are found ticked, the preset live for either, the order against
+	// DLSS 5 NR only where the network runs after the upscaling; and the DLAA, which
+	// resizes nothing, leaving every list as it was without it.
+	printf("\nDLAA after scaling, against DLSS Super Resolution\n\n");
+	printf("%-9s %-11s %-9s %-8s %-8s %-7s %-10s %-9s %-6s\n",
+		"DLSS SR", "DLAA after", "NR after", "SR box", "SR DLAA", "preset", "DLAA box", "its order", "lists");
+	int wrongDlaa = 0;
+	for (const bool bSR : { false, true }) {
+		for (const bool bDlaa : { false, true }) {
+			for (const bool bNRAfter : { false, true }) {
+				Settings_t sets;
+				sets.bUseD3D11 = true;
+				sets.bVPScaling = true;
+				sets.VPFmts.bNV12 = sets.VPFmts.bP01x = sets.VPFmts.bYUY2 = sets.VPFmts.bOther = true;
+				sets.bDlssNR = true;
+				sets.bDlssNRAfterUpscale = bNRAfter;
+				sets.bDlssSR = bSR;
+				sets.bDlaaAfterScaling = bDlaa;
+				const Greying g = GreyingFor(sets, true, true, false);
+				Settings_t plain = sets;
+				plain.bDlaaAfterScaling = false;
+				const Greying p = GreyingFor(plain, true, true, false);
+				const bool bListsKept = g.bUpscalingList == p.bUpscalingList && g.bDownscalingList == p.bDownscalingList
+					&& g.bSuperRes == p.bSuperRes && g.bVPResizingBox == p.bVPResizingBox && g.bChromaList == p.bChromaList;
+				const bool bWrong = g.bDlssSRBox != (bSR || !bDlaa) || g.bDlssSRDlaaBox != bSR
+					|| g.bDlssPresetList != (bSR || bDlaa) || g.bDlaaAfterBox != !bSR
+					|| g.bDlaaAfterNRBox != (!bSR && bDlaa && bNRAfter) || !bListsKept;
+				wrongDlaa += bWrong;
+				printf("%-9s %-11s %-9s %-8s %-8s %-7s %-10s %-9s %-6s%s\n",
+					bSR ? "ticked" : "off", bDlaa ? "ticked" : "off", bNRAfter ? "yes" : "no",
+					g.bDlssSRBox ? "live" : "GREYED", g.bDlssSRDlaaBox ? "live" : "GREYED",
+					g.bDlssPresetList ? "live" : "GREYED", g.bDlaaAfterBox ? "live" : "GREYED",
+					g.bDlaaAfterNRBox ? "live" : "GREYED", bListsKept ? "kept" : "MOVED",
+					bWrong ? "   <-- WRONG" : "");
+			}
+		}
+	}
+	printf("\n%s\n", wrongDlaa
+		? "DLSS SR and the DLAA after scaling have to grey each other, DLSS SR's box staying live\n"
+		  "when both are ticked; the DLAA's order only with DLSS 5 NR after the upscaling; and the\n"
+		  "DLAA has to leave every list as it is without it."
+		: "DLSS SR and the DLAA after scaling grey each other, the preset serves both, and the DLAA\n"
+		  "leaves every list as it is without it.");
+	wrong += wrongDlaa;
+
+	// The HDR curve: its box with Direct3D 11 on Windows 10, its values with the box; and it
+	// leaves every other control of the page as it is without it.
+	printf("\nThe HDR curve\n\n");
+	printf("%-9s %-9s %-7s %-8s %-8s %-6s\n", "D3D11", "Win 10", "curve", "box", "values", "others");
+	int wrongCurve = 0;
+	for (const bool bD3D11 : { false, true }) {
+		for (const bool bWin10 : { false, true }) {
+			for (const bool bCurve : { false, true }) {
+				Settings_t sets;
+				sets.bUseD3D11 = bD3D11;
+				sets.bHdrCurve = bCurve;
+				const Greying g = GreyingFor(sets, true, bWin10, false);
+				Settings_t plain = sets;
+				plain.bHdrCurve = false;
+				const Greying p = GreyingFor(plain, true, bWin10, false);
+				const bool bOthersKept = g.bUpscalingList == p.bUpscalingList && g.bDownscalingList == p.bDownscalingList
+					&& g.bSuperRes == p.bSuperRes && g.bChromaList == p.bChromaList && g.bCleaning == p.bCleaning
+					&& g.bDlssSRBox == p.bDlssSRBox && g.bDlaaAfterBox == p.bDlaaAfterBox;
+				const bool bWrong = g.bHdrCurveBox != (bD3D11 && bWin10) || g.bHdrCurveValues != (bD3D11 && bWin10 && bCurve)
+					|| !bOthersKept;
+				wrongCurve += bWrong;
+				printf("%-9s %-9s %-7s %-8s %-8s %-6s%s\n", bD3D11 ? "yes" : "no", bWin10 ? "yes" : "no",
+					bCurve ? "ticked" : "off", g.bHdrCurveBox ? "live" : "GREYED", g.bHdrCurveValues ? "live" : "GREYED",
+					bOthersKept ? "kept" : "MOVED", bWrong ? "   <-- WRONG" : "");
+			}
+		}
+	}
+	printf("\n%s\n", wrongCurve
+		? "The HDR curve's box has to be live with Direct3D 11 on Windows 10, its values with the box,\n"
+		  "and nothing else on the page may move with it."
+		: "The HDR curve's box is live with Direct3D 11 on Windows 10, its values with the box, and\n"
+		  "nothing else on the page moves with it.");
+	wrong += wrongCurve;
 	printf("%d failure(s)\n", wrong);
 	return wrong ? 1 : 0;
 }
@@ -1462,11 +1976,28 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 	sets.bHdrPassthrough = false;
 	sets.iHdrToggleDisplay = HDRTD_Disabled;
 	sets.bDlssNR = config.bNR;
+	// --nrafter: the network after the upscaling. Without it, before, whatever the
+	// registry holds, so that a run measures the order it names.
+	sets.bDlssNRAfterUpscale = g_bNRAfter;
 	sets.bDlssSR = config.bSR;
 	// --dlaa: DLSS Super Resolution at the picture's own size. It only shows itself
-	// when the window is the size of the source, which is the one case the ordinary
-	// runs never produce -- they enlarge.
+	// when the window is the size of the source or smaller, after the Downscaling
+	// method then, which are the cases the ordinary runs never produce -- they enlarge.
 	sets.bDlssSRDlaa = g_bDlaa;
+	// --dlaaafter, --dlaaafternr: DLSS's DLAA after the resizing, whoever resizes. Off
+	// without them, whatever the registry holds.
+	sets.bDlaaAfterScaling = g_bDlaaAfter;
+	sets.bDlaaAfterNR = g_bDlaaAfterNR;
+	// --hdrcurve N: the HDR curve, preset N at its full strength. Off without it, whatever the
+	// registry holds.
+	sets.bHdrCurve = g_filmHdrCurve > 0;
+	if (g_filmHdrCurve > 0) {
+		sets.iHdrCurvePreset = g_filmHdrCurve;
+		sets.iHdrCurveStrength = 100;
+		// The values typed for Custom as well, which a preset does not use but the "curve
+		// kept" line prints: the registry's would make the report the machine's.
+		HdrCurve::StoreValues(sets, HdrCurve::ValuesOf(Settings_t{}));
+	}
 	// --small N: the Upscaling method that stands in under five per cent, by its
 	// UPSCALE_ value. Without it the option is off, whatever the registry holds, so
 	// that every other run measures the method it names.
@@ -1653,6 +2184,11 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 			printf("   peak kept    : start over at a cut %d, dither moving %d\n", (int)back.bSdrPeakSceneCuts,
 				(int)back.bDitherMoving);
 		}
+		// The HDR curve, the last fields of Settings_t now.
+		if (g_filmHdrCurve > 0) {
+			printf("   curve kept   : on %d, preset %d, strength %d, cap %d\n", (int)back.bHdrCurve,
+				back.iHdrCurvePreset, back.iHdrCurveStrength, back.iHdrCurvePeakCap);
+		}
 	}
 	}
 
@@ -1711,6 +2247,107 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		} else {
 			printf("   screen watch: half floats asked for, 0x%08X\n", (unsigned)watch.HdrAttempt());
 		}
+	}
+
+	if (g_seekTime > 0 && g_filmFile) {
+		ReportSeekTime(pGraph, pRenderer, g_seekTime);
+	}
+
+	if (g_hdrTune && g_filmFile) {
+		const std::vector<RegValue> savedKey = ReadKeyValues(kPlusKey);
+		g_tuneSavedKey = savedKey;
+		result.bTuneOnly = true;
+		const char* what = g_hdrTuneStopAt > 0 ? "stopped by the player" : g_hdrTunePlayAt > 0 ? "the player playing again"
+			: g_hdrTuneCancelAt > 0 ? "cancelled by its key" : g_hdrTune == 2 ? "measuring only" : "tuning and keeping";
+		printf("\n-- the HDR curve's tune, %s\n", what);
+		if (g_hdrTuneStopAt > 0) {
+			// Stopped, and the graph let go at once, the tune still running: its last
+			// reference may be the tune's, and the filter go on the tune's thread.
+			CComQIPtr<IExFilterConfig> pConfig{ pRenderer.p };
+			LARGE_INTEGER t0;
+			QueryPerformanceCounter(&t0);
+			pConfig->Flt_SetInt("cmd_hdrCurveTune", 1);
+			while (SinceMs(t0) < g_hdrTuneStopAt * 1000) {
+				Pump(20);
+			}
+			int running = 0;
+			pConfig->Flt_GetInt("hdrCurveTune", &running);
+			pMC->Stop();
+			printf("   stopped %.1f s into it, the tune %s; the graph let go at once\n", SinceMs(t0) / 1000.0,
+				running ? "running" : "ALREADY OVER");
+			if (!running) {
+				printf("   FAIL: the tune was over before the film was stopped: nothing tested\n");
+				result.tuneFailures++;
+			}
+			result.bTuneStopped = true;
+			return result;   // the registry is put back by the caller, once the tune is gone
+		}
+		if (g_hdrTuneCancelAt > 0 || g_hdrTunePlayAt > 0) {
+			const bool bCancel = g_hdrTuneCancelAt > 0;
+			CComQIPtr<IExFilterConfig> pConfig{ pRenderer.p };
+			const double seconds = RunTune(pRenderer, 1, bCancel ? g_hdrTuneCancelAt : g_hdrTunePlayAt, [&]() {
+				if (bCancel) {
+					pConfig->Flt_SetInt("cmd_hdrCurveTune", 0);
+				} else {
+					pMC->Run();
+				}
+			});
+			const std::wstring report = TuneReport(pRenderer);
+			PrintTuneReport(report);
+			const wchar_t* said = bCancel ? L"stopped: cancelled by its key" : L"stopped: the player played the film";
+			if (report.find(said) == std::wstring::npos) {
+				wprintf(L"   FAIL: the tune did not say \"%s\"\n", said);
+				result.tuneFailures++;
+			}
+			// Cancelled, nothing is kept; with Play, what was measured by then may be.
+			int measured = 0;
+			swscanf_s(TuneLine(report, L" places measured").c_str(), L"%d", &measured);
+			const bool bKept = !bCancel && report.find(L"applied and kept") != std::wstring::npos;
+			// The checks of a whole tune, but for the places measured.
+			OAFilterState state = State_Stopped;
+			pMC->GetState(2000, &state);
+			double backSec = 0, delta = 1e9;
+			swscanf_s(TuneLine(report, L"back at ").c_str(), L"back at %lf s, %lf", &backSec, &delta);
+			printf("   %.1f s, %d places measured, back %+.3f s from its picture, %s, %s\n", seconds, measured, delta,
+				state == State_Running ? "playing" : "NOT PLAYING", bKept ? "kept" : "nothing kept");
+			if (state != State_Running || std::abs(delta) > 0.05) {
+				printf("   FAIL: the film is not playing again from its picture\n");
+				result.tuneFailures++;
+			}
+			if (bCancel && !CurveKeyUnchanged(savedKey)) {
+				printf("   FAIL: a cancelled tune changed the curve in the registry\n");
+				result.tuneFailures++;
+			}
+			WriteKeyValues(kPlusKey, savedKey);
+			return result;
+		}
+
+		if (g_bHdrTuneByKey) {
+			Settings_t keyed;
+			pVR->GetSettings(keyed);
+			keyed.iHdrCurveTuneKey = VK_F9 | PRESETKEY_Ctrl;
+			pVR->SetSettings(keyed);
+			printf("   started by its key, Ctrl+F9\n");
+		}
+		const double first = RunTune(pRenderer, g_hdrTune, 0, {}, g_bHdrTuneByKey ? hwnd : nullptr);
+		const std::wstring report = TuneReport(pRenderer);
+		PrintTuneReport(report);
+		result.tuneFailures += CheckTune(report, first, pMC, g_hdrTune == 1, pVR, savedKey);
+		if (g_hdrTune == 1) {
+			// Again, measuring only: the same places, the same pictures before the curve, the
+			// same values -- whatever the curve now does to them.
+			Pump(1500);
+			const double second = RunTune(pRenderer, 2);
+			const std::wstring again = TuneReport(pRenderer);
+			const std::wstring a = TuneLine(report, L"values: "), b = TuneLine(again, L"values: ");
+			wprintf(L"   again, %.1f s, the curve on: %s; %s\n", second, TuneLine(again, L" places measured").c_str(), b.c_str());
+			if (a.empty() || a != b) {
+				printf("   FAIL: a second tune on the same film did not find the same values\n");
+				result.tuneFailures++;
+			}
+		}
+		WriteKeyValues(kPlusKey, savedKey);
+		return result;
 	}
 
 	std::wstring text = StatsText(pRenderer);
@@ -1960,6 +2597,95 @@ static Result RunConfig(HMODULE hFilter, HWND hwnd, const Config& config, SIZE s
 		Pump(500);
 		SeekTo(pGraph, g_filmSeek);
 		Pump(2500);
+	}
+	// --hdrcurve: its step in the statistics, then the same paused picture off the desktop,
+	// statistics off, with the curve and without it. The shadows are the pixels under 10 nits
+	// without it, the mid tones those from 10 to 200: their mean light either way, in nits,
+	// and the brightest pixel's. What the preset is for is checked on them: shadows raised
+	// where it lifts, nothing above its cap, the mid tones darker where only its mid grey moves
+	// them down.
+	if (g_filmHdrCurve > 0 && g_filmFile) {
+		double finishMs = -1;
+		const std::wstring finish = StepLine(text, L"Finish", &finishMs);
+		const std::wstring curveLine = StepLine(text, L"HDR curve");
+		wprintf(L"   Finish       : %s%s\n", finish.c_str(), finishMs >= 0 ? std::format(L", {:.1f} ms", finishMs).c_str() : L"");
+		wprintf(L"   HDR curve    : %s\n", curveLine.empty() ? L"(no line)" : curveLine.c_str());
+		const bool bHdrOut = !result.hdrLine.empty();
+		if (bHdrOut && finish.find(L"HDR curve") == std::wstring::npos) {
+			printf("   FAIL: the picture leaves in HDR and Finish has no HDR curve\n");
+			result.curveFailures++;
+		}
+		if (bHdrOut && curveLine.empty()) {
+			printf("   FAIL: no HDR curve line in the statistics\n");
+			result.curveFailures++;
+		}
+		if (watch.Ready() && watch.Format() != DXGI_FORMAT_B8G8R8A8_UNORM && bHdrOut) {
+			const bool bStats = sets.bShowStats;
+			sets.bShowStats = false;
+			pVR->SetSettings(sets);
+			watch.m_bKeepLinear = true;
+			const auto ReadStill = [&]() {
+				SeekTo(pGraph, g_filmSeek);
+				Pump(2500);
+				SetForegroundWindow(hwnd);
+				BringWindowToTop(hwnd);
+				Pump(600);
+				return watch.Measure(hwnd);
+			};
+			const CScreenWatch::Reading on = ReadStill();
+			sets.bHdrCurve = false;
+			pVR->SetSettings(sets);
+			const CScreenWatch::Reading off = ReadStill();
+			sets.bHdrCurve = true;
+			sets.bShowStats = bStats;
+			pVR->SetSettings(sets);
+			watch.m_bKeepLinear = false;
+			if (on.ok && off.ok && !on.linear.empty() && on.linear.size() == off.linear.size()) {
+				double darkOn = 0, darkOff = 0, midOn = 0, midOff = 0, peakOn = 0, peakOff = 0;
+				size_t nDark = 0, nMid = 0;
+				for (size_t i = 0; i + 2 < on.linear.size(); i += 3) {
+					// scRGB, BT.709, 1.0 = 80 nits
+					const double yOn = 80.0 * (0.2126 * on.linear[i] + 0.7152 * on.linear[i + 1] + 0.0722 * on.linear[i + 2]);
+					const double yOff = 80.0 * (0.2126 * off.linear[i] + 0.7152 * off.linear[i + 1] + 0.0722 * off.linear[i + 2]);
+					peakOn = std::max(peakOn, yOn);
+					peakOff = std::max(peakOff, yOff);
+					if (yOff < 10.0) {
+						darkOn += yOn;
+						darkOff += yOff;
+						nDark++;
+					} else if (yOff < 200.0) {
+						midOn += yOn;
+						midOff += yOff;
+						nMid++;
+					}
+				}
+				darkOn /= std::max<size_t>(nDark, 1);
+				darkOff /= std::max<size_t>(nDark, 1);
+				midOn /= std::max<size_t>(nMid, 1);
+				midOff /= std::max<size_t>(nMid, 1);
+				const size_t n = on.linear.size() / 3;
+				printf("   on screen    : shadows %.3f -> %.3f nits (%.1f%% of the picture), mid tones %.2f -> %.2f (%.1f%%),"
+					" brightest %.1f -> %.1f\n", darkOff, darkOn, 100.0 * nDark / n, midOff, midOn, 100.0 * nMid / n, peakOff, peakOn);
+				const HdrCurve::Values v = HdrCurve::Applied(g_filmHdrCurve, {}, sets.iHdrDisplayMaxNits, 100);
+				if (v.liftEv100 > 0 && nDark && !(darkOn > darkOff)) {
+					printf("   FAIL: the preset lifts the shadows, and they are no brighter\n");
+					result.curveFailures++;
+				}
+				if (v.capNits && peakOn > v.capNits * 1.02) {
+					printf("   FAIL: %.1f nits on the screen, over the cap of %d\n", peakOn, v.capNits);
+					result.curveFailures++;
+				}
+				if (!v.liftEv100 && v.midGreyNits < HdrCurve::kMidNeutral && nMid && !(midOn < midOff)) {
+					printf("   FAIL: the preset's mid grey darkens the mid tones, and they are no darker\n");
+					result.curveFailures++;
+				}
+			} else {
+				printf("   FAIL: the paused picture could not be read off the desktop with and without the curve\n");
+				result.curveFailures++;
+			}
+		} else {
+			printf("   on screen    : not measured (%s)\n", !bHdrOut ? "the picture leaves in SDR" : "an SDR desktop");
+		}
 	}
 	// A snapshot (GetCurrentImage, the player's "save image") renders the picture again
 	// into a target of its own, and puts the renderer back as it found it. Whether it
@@ -2666,12 +3392,68 @@ static int ShowPropertyPage(HMODULE hFilter, HWND hwnd, int seconds, REFCLSID cl
 		Pump(300);
 	}
 
+	// --typenits: the display's peak typed into the HDR curve's box, as a user would, which
+	// must be written into the HDR tab's Nits, the one setting both stand for; and the roll-off's
+	// start the curve's tab then shows, which a preset scales by it. Dark and bright is chosen
+	// first, as a user would: the preset the registry holds may be Custom, which nothing scales.
+	// Typed only: the page is closed without Apply, and nothing reaches the registry.
+	int failures = 0;
+	if (g_typeNits > 0) {
+		const HWND hDlg = GetWindow(hwnd, GW_CHILD);
+		const HWND hCurveNits = hDlg ? FindItem(hDlg, 1294) : nullptr;   // IDC_HDRCURVE_NITS
+		const HWND hHdrNits = hDlg ? FindItem(hDlg, 1003) : nullptr;     // IDC_EDIT_DISPLAYMAX
+		const HWND hStart = hDlg ? FindItem(hDlg, 1398) : nullptr;       // IDC_HDRCURVE_START
+		const HWND hPreset = hDlg ? FindItem(hDlg, 1392) : nullptr;      // IDC_HDRCURVE_PRESET
+		int item = -1;
+		if (hPreset) {
+			const int count = (int)SendMessageW(hPreset, CB_GETCOUNT, 0, 0);
+			for (int i = 0; i < count && item < 0; i++) {
+				if ((int)SendMessageW(hPreset, CB_GETITEMDATA, i, 0) == HdrCurve::DarkAndBright) {
+					item = i;
+				}
+			}
+		}
+		if (!hCurveNits || !hHdrNits || !hStart || item < 0) {
+			printf("FAIL: the display peak boxes, or Dark and bright, are not on the page\n");
+			failures++;
+		} else {
+			SendMessageW(hPreset, CB_SETCURSEL, item, 0);
+			SendMessageW(GetParent(hPreset), WM_COMMAND, MAKEWPARAM(1392, CBN_SELCHANGE), (LPARAM)hPreset);
+			Pump(100);
+			wchar_t nits[16] = {}, before[16] = {}, typed[16] = {}, mirrored[16] = {}, start[16] = {};
+			GetWindowTextW(hCurveNits, nits, (int)std::size(nits));
+			GetWindowTextW(hStart, before, (int)std::size(before));
+			SetWindowTextW(hCurveNits, std::to_wstring(g_typeNits).c_str());
+			Pump(200);
+			GetWindowTextW(hCurveNits, typed, (int)std::size(typed));
+			GetWindowTextW(hHdrNits, mirrored, (int)std::size(mirrored));
+			GetWindowTextW(hStart, start, (int)std::size(start));
+			const HdrCurve::Values preset = HdrCurve::PresetValues(HdrCurve::DarkAndBright);
+			const int wantBefore = HdrCurve::ForDisplay(preset, _wtoi(nits)).startNits;
+			const int want = HdrCurve::ForDisplay(preset, g_typeNits).startNits;
+			wprintf(L"display peak typed %s on the HDR curve tab: the HDR tab's Nits says %s; "
+				L"Dark and bright's roll-off from %s, was %s at %s nits\n", typed, mirrored, start, before, nits);
+			if (wcscmp(typed, mirrored)) {
+				printf("FAIL: the HDR tab's Nits did not follow the HDR curve's\n");
+				failures++;
+			}
+			if (_wtoi(before) != wantBefore || _wtoi(start) != want) {
+				printf("FAIL: the roll-off shown is not the preset's on this display: %d then %d wanted\n",
+					wantBefore, want);
+				failures++;
+			}
+		}
+	}
+
 	Pump(std::max(0, seconds * 1000 - 1000));
 
 	pPage->Deactivate();
 	pPage->SetObjects(0, nullptr);
 	pPage->SetPageSite(nullptr);
-	return 0;
+	if (g_typeNits > 0) {
+		printf("%d failure(s)\n", failures);
+	}
+	return failures ? 1 : 0;
 }
 
 // --clean: the displayed picture's luma against the clean picture's, and how much of the
@@ -2849,6 +3631,8 @@ int wmain(int argc, wchar_t* argv[])
 			g_nrScaleTo = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--hover")) {
 			g_hoverIds.push_back(_wtoi(argv[i + 1]));
+		} else if (!wcscmp(argv[i], L"--typenits")) {
+			g_typeNits = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--click")) {
 			clickControls.push_back(_wtoi(argv[i + 1]));
 		} else if (!wcscmp(argv[i], L"--filter")) {
@@ -2857,8 +3641,12 @@ int wmain(int argc, wchar_t* argv[])
 			g_filmFile = argv[i + 1];
 		} else if (!wcscmp(argv[i], L"--seek")) {
 			g_filmSeek = _wtof(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--seektime")) {
+			g_seekTime = std::clamp(_wtoi(argv[i + 1]), 1, 64);
 		} else if (!wcscmp(argv[i], L"--rtxhdr")) {
 			g_filmRtxHdr = _wtoi(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--hdrcurve")) {
+			g_filmHdrCurve = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--superres")) {
 			g_filmSuperRes = _wtoi(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--prepass")) {
@@ -2897,6 +3685,22 @@ int wmain(int argc, wchar_t* argv[])
 			g_filmDeblockMethod = DEBLOCK_SPP;
 		} else if (!wcscmp(argv[i], L"--logo")) {
 			g_bLogo = true;
+		} else if (!wcscmp(argv[i], L"--hdrtune")) {
+			g_hdrTune = 1;
+		} else if (!wcscmp(argv[i], L"--hdrtunescan")) {
+			g_hdrTune = 2;
+		} else if (!wcscmp(argv[i], L"--bykey")) {
+			g_hdrTune = 1;
+			g_bHdrTuneByKey = true;
+		} else if (!wcscmp(argv[i], L"--cancelat") && i + 1 < argc) {
+			g_hdrTune = 1;
+			g_hdrTuneCancelAt = _wtof(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--playat") && i + 1 < argc) {
+			g_hdrTune = 1;
+			g_hdrTunePlayAt = _wtof(argv[i + 1]);
+		} else if (!wcscmp(argv[i], L"--stopat") && i + 1 < argc) {
+			g_hdrTune = 1;
+			g_hdrTuneStopAt = _wtof(argv[i + 1]);
 		} else if (!wcscmp(argv[i], L"--sharpencal")) {
 			g_bSharpenCal = true;
 		} else if (!wcscmp(argv[i], L"--calup") && i + 1 < argc) {
@@ -2930,12 +3734,19 @@ int wmain(int argc, wchar_t* argv[])
 			g_bGreying = true;
 		} else if (!wcscmp(argv[i], L"--afternr")) {
 			g_bAfterNR = true;
+		} else if (!wcscmp(argv[i], L"--nrafter")) {
+			g_bNRAfter = true;
 		} else if (!wcscmp(argv[i], L"--aftergrab")) {
 			g_bAfterGrab = true;
 		} else if (!wcscmp(argv[i], L"--vpturns")) {
 			g_bVPTurns = true;
 		} else if (!wcscmp(argv[i], L"--dlaa")) {
 			g_bDlaa = true;
+		} else if (!wcscmp(argv[i], L"--dlaaafter")) {
+			g_bDlaaAfter = true;
+		} else if (!wcscmp(argv[i], L"--dlaaafternr")) {
+			g_bDlaaAfter = true;
+			g_bDlaaAfterNR = true;
 		} else if (!wcscmp(argv[i], L"--themed")) {
 			g_bThemedHost = true;
 		} else if (!wcscmp(argv[i], L"--apply")) {
@@ -3227,7 +4038,8 @@ int wmain(int argc, wchar_t* argv[])
 	if (g_bAfterNR) {
 		printf("--afternr: the film paused at the same place under each run, read off the desktop.\n");
 		printf("still: against the last run the shaders enlarged, each channel's shift and the difference\n");
-		printf("of 16x16 blocks, in 8-bit levels. A filter moves neither; a wrong matrix or range moves both.\n\n");
+		printf("of 16x16 blocks, in 8-bit levels. A filter moves neither; a wrong matrix or range moves both.\n");
+		printf(g_bNRAfter ? "--nrafter: DLSS 5 NR after the upscaling; the processor enlarges in its one turn, before it.\n\n" : "\n");
 	}
 	const std::wstring exeDir = std::wstring(exe).substr(0, std::wstring(exe).find_last_of(L'\\'));
 	std::vector<BYTE> firstPicture;
@@ -3237,6 +4049,36 @@ int wmain(int argc, wchar_t* argv[])
 	std::map<int, double> calGradient;          // --sharpencal: each run's mean luma gradient
 	int calW = 0, calH = 0;
 	std::map<int, std::wstring> cleanLines;     // and what the statistics said of the cleaning
+	// --dlaaafter, whatever the mode: its own step after the resizing where DLSS SR is off,
+	// none where it is on (it gives way), and with DLSS 5 NR after the upscaling, before the
+	// network or, with --dlaaafternr, after it.
+	const auto CheckDlaaAfter = [&](const Result& r, const Config& config) {
+		if (!g_bDlaaAfter) {
+			return;
+		}
+		double dlaaMs = -1;
+		const std::wstring dlaa = StepLine(r.statsAll, L"DLAA", &dlaaMs);
+		if (!dlaa.empty()) {
+			wprintf(L"   DLAA         : %s%s\n", dlaa.c_str(), dlaaMs >= 0 ? std::format(L", {:.1f} ms", dlaaMs).c_str() : L"");
+		}
+		const bool bRuns = dlaa.find(L"DLSS SR DLAA") != std::wstring::npos;
+		if (config.bSR && !dlaa.empty()) {
+			printf("   FAIL: a DLAA step after the resizing with DLSS SR on, which it is to give way to\n");
+			failures++;
+		} else if (!config.bSR && !bRuns) {
+			printf("   FAIL: DLAA after scaling asked for and not running\n");
+			failures++;
+		}
+		const int dlaaAt = StepNumber(r.statsAll, L"DLAA"), nrAt = StepNumber(r.statsAll, L"DLSS 5 NR");
+		if (bRuns && config.bNR && g_bNRAfter && nrAt > 0) {
+			printf("   order        : DLAA step %d, DLSS 5 NR step %d\n", dlaaAt, nrAt);
+			if ((dlaaAt > nrAt) != g_bDlaaAfterNR) {
+				printf("   FAIL: the DLAA %s DLSS 5 NR, where it was asked to come %s it\n",
+					dlaaAt > nrAt ? "after" : "before", g_bDlaaAfterNR ? "after" : "before");
+				failures++;
+			}
+		}
+	};
 	for (int c = 0; c < configCount; c++) {
 		if (only >= 0 && c != only) {
 			continue;
@@ -3258,6 +4100,16 @@ int wmain(int argc, wchar_t* argv[])
 		if (r.bSnapshotChanged) {
 			failures++;
 		}
+		failures += r.curveFailures;
+		failures += r.tuneFailures;
+		if (r.bTuneStopped) {
+			failures += TuneThreadLeft();
+			WriteKeyValues(kPlusKey, g_tuneSavedKey);
+		}
+		if (r.bTuneOnly) {
+			continue;
+		}
+		CheckDlaaAfter(r, config);
 		if (g_bSharpenCal) {
 			if (r.picture.empty()) {
 				printf("   FAILED: no displayed picture\n");
@@ -3302,7 +4154,9 @@ int wmain(int argc, wchar_t* argv[])
 			}
 		}
 		if (g_bVPTurns) {
-			wprintf(L"   processor    : %s\n", r.vprocLine.c_str());
+			// Its GPU time too, Super Resolution's included, which says when the driver ran it.
+			const double vpMs = StepMs(r.statsAll, L"Processor");
+			wprintf(L"   processor    : %s%s\n", r.vprocLine.c_str(), vpMs >= 0 ? std::format(L", {:.1f} ms", vpMs).c_str() : L"");
 			wprintf(L"   scaling      : %s\n", r.scalingLine.c_str());
 			printf("   the processor: %s\n", !(r.vpUse & (VPUSE_Converting | VPUSE_Resizing)) ? "not in the chain"
 				: (r.vpUse & VPUSE_Resizing) ? "converts and resizes" : "converts");
@@ -3345,18 +4199,30 @@ int wmain(int argc, wchar_t* argv[])
 				wprintf(L"   FAIL: DLSS 5 NR did not run (%s)\n", r.nrLine.c_str());
 				failures++;
 			}
-			if (bProcessor != bResizes) {
-				printf("   FAIL: %s\n", bProcessor ? "the processor did not enlarge what DLSS 5 NR left"
-					: "the processor resized where the shaders were asked to");
+			// After the upscaling, the statistics' step says so, and the processor has no
+			// second turn: it enlarges in its first, before the network.
+			if (g_bNRAfter != (r.nrLine.find(L"after upscaling") != std::wstring::npos)) {
+				wprintf(L"   FAIL: DLSS 5 NR is not where it was asked to be (%s)\n", r.nrLine.c_str());
 				failures++;
 			}
-			if (bProcessor && r.dlssTimes.find(L"resize ") == std::wstring::npos) {
+			if (bProcessor != bResizes) {
+				printf("   FAIL: %s\n", bProcessor ? (g_bNRAfter ? "the processor did not enlarge before DLSS 5 NR"
+					: "the processor did not enlarge what DLSS 5 NR left") : "the processor resized where the shaders were asked to");
+				failures++;
+			}
+			const bool bSecondTurn = r.dlssTimes.find(L"resize ") != std::wstring::npos;
+			if (bProcessor && !g_bNRAfter && !bSecondTurn) {
 				printf("   FAIL: the statistics give the processor's second turn no time\n");
+				failures++;
+			}
+			if (g_bNRAfter && bSecondTurn) {
+				printf("   FAIL: the processor took a second turn after a network that comes last\n");
 				failures++;
 			}
 			const bool bStar = r.scalingLine.find(L"SuperResolution*") != std::wstring::npos;
 			if (bStar != (config.iSuperRes != SUPERRES_Disable && config.iPrepass != 1 && bProcessor)) {
 				printf("   FAIL: Super Resolution %s\n", bStar ? "is on in a run that did not ask for it"
+					: g_bNRAfter ? "was asked for and the processor's turn does not have it"
 					: "was asked for and the processor's second turn does not have it");
 				failures++;
 			}
@@ -3549,6 +4415,13 @@ int wmain(int argc, wchar_t* argv[])
 		}
 		if (config.bSR) {
 			wprintf(L"   DLSS SR      : %s\n", r.srLine.c_str());
+			// --dlaa with a window no larger than the picture, stretched to it: DLSS SR at the
+			// window's size, after the Downscaling method where the picture shrinks.
+			if (g_bDlaa && !g_filmFile && !g_bLetterbox && window.cx <= source.cx && window.cy <= source.cy
+					&& r.srLine.find(L"DLAA") == std::wstring::npos) {
+				printf("   FAIL: DLAA asked for, the window no larger than the picture, and DLSS SR not running in it\n");
+				failures++;
+			}
 		}
 		if (!r.dlssTimes.empty()) {
 			wprintf(L"   DLSS (ms)    : %s\n", r.dlssTimes.c_str());
@@ -3575,7 +4448,7 @@ int wmain(int argc, wchar_t* argv[])
 			printf("   no Sync offset read\n");
 			failures++;
 		}
-		printf("   frames       : %d shown while measuring, %d skipped, %d late (%d while settling)\n",
+		printf("   frames       : %d shown while measuring, %d skipped, %d after Present (%d while settling)\n",
 			r.framesAtEnd - r.framesAtStart, r.skippedAtEnd - r.skippedAtStart, r.lateAtEnd - r.lateAtStart, r.lateAtStart);
 		printf("   state changes: pause %.2f s, run %.2f s, stop %.2f s\n", r.stopSeconds[0], r.stopSeconds[1], r.stopSeconds[2]);
 		for (double s : r.stopSeconds) {

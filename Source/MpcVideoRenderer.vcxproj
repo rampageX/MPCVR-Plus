@@ -93,6 +93,7 @@
     <ClCompile Include="FrameGen\echo\EchoSynth11.cpp" />
     <ClCompile Include="DX11VideoProcessorCadence.cpp" />
     <ClCompile Include="DX11VideoProcessorStats.cpp" />
+    <ClCompile Include="DX11VideoProcessorHdrCurve.cpp" />
     <ClCompile Include="DX9Helper.cpp" />
     <ClCompile Include="DX9VideoProcessor.cpp" />
     <ClCompile Include="DXVA2VP.cpp" />
@@ -117,6 +118,7 @@
     <ClCompile Include="Utils\Util.cpp" />
     <ClCompile Include="VideoProcessor.cpp" />
     <ClCompile Include="VideoRenderer.cpp" />
+    <ClCompile Include="VideoRendererHdrTune.cpp" />
     <ClCompile Include="VideoRendererInputPin.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -156,6 +158,9 @@
     <ClInclude Include="FrameStats.h" />
     <ClInclude Include="Helper.h" />
     <ClInclude Include="IVideoRenderer.h" />
+    <ClInclude Include="HdrCurve.h" />
+    <ClInclude Include="HdrCurveTune.h" />
+    <ClInclude Include="HdrCurveTuneProbe.h" />
     <ClInclude Include="MediaSampleSideData.h" />
     <ClInclude Include="NvidiaAppSettings.h" />
     <ClInclude Include="PropPage.h" />

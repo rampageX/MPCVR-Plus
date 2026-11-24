@@ -10,7 +10,7 @@ rendering is bit-identical to upstream.
 | **Chroma** | six more methods, libplacebo's EWA Lanczos Sharp the default, and a 4:4:4 pre-pass that hands the hardware video processor a full picture: +7 dB of colour on 10-bit film |
 | **Detail** | deblocking (PP7, or SPP for a powerful GPU) and debanding on the decoded planes, and sharpening after the resize, each with five calibrated levels; a TV channel's logo found and hidden |
 | **DLSS 5 NR** | NVIDIA neural reconstruction (NGX feature 18) with a temporal stabilizer made for video |
-| **DLSS SR** | DLSS Super Resolution 4.5 for enlarging, and DLAA at native size (experimental) |
+| **DLSS SR** | DLSS Super Resolution 4.5 for enlarging, and DLAA at native size or after downscaling (experimental) |
 | **Presentation** | render ahead, so none of it drifts off the audio clock |
 | **Statistics** | each step and what it costs, and with rampageX's OSD Plus the codec, the audio path and the machine's load |
 | **Settings** | one page, seven tabs, in the order the picture travels through them |
@@ -358,6 +358,13 @@ with a finer flow, a fortieth of an 8-bit level, where going from 80 to 55 % add
 Optical Flow took 0.6 ms at 480x270, 2.1 ms at 1728x972 and 6.8 ms at 3456x1944, Full at 90 %.
 So the divider is left to the viewer, and Auto keeps every film where it always was.
 
+2/3 came later, between 1/2 and Full, and was measured the same way (21 November 2026, 1/2,
+2/3 and Full in turn). On the moving object it keeps nearly all Full gives: `obj dev` 0.00076
+at 60 % where 1/2 leaves 0.00080 and Full 0.00075, 0.00093 at 55 % with Full, 0.00096 at 1/2.
+The still picture does not move, to 0.02 dB, and the pan falls between the two, 54.55 dB at
+80 % where 1/2 gives 54.86 and Full 54.46. It costs about a quarter of what Full adds over
+1/2 (the cost table under *Temporal stabilizer*).
+
 ---
 
 ## Temporal stabilizer
@@ -394,9 +401,10 @@ So the stabilizer works **after** the network and never touches its inputs
    wrong motion estimate cannot drag old values far.
 3. **Motion** comes from **NVIDIA Optical Flow**: forward and backward flow from the driver's
    `nvofapi64.dll` (4×4 grid, medium quality), computed on the working picture divided by
-   *Optical Flow resolution* -- 1/4, 1/3, 1/2, Full, or Auto, the default, which takes 1, 2
-   or 4 from the working height for about 540 lines as the stabilizer always did: 960x540 for a
-   1080p film. The history is moved along the vectors, so moving areas are steadied too. A
+   *Optical Flow resolution* -- 1/4, 1/3, 1/2, 2/3, Full, or Auto, the default, which takes 1,
+   2 or 4 from the working height for about 540 lines as the stabilizer always did: 960x540 for
+   a 1080p film. At 2/3 a flow pixel covers one and a half working pixels each way, and each
+   working pixel counts in it for the part it covers. The history is moved along the vectors, so moving areas are steadied too. A
    vector is trusted according to its forward/backward consistency, its matching cost, and
    how well the previous input, moved along it, matches the current one; where trust falls,
    the network's output for that picture is used as it is.
@@ -460,19 +468,22 @@ its edges.
 Checked in the harness (`--tstabport`): the filter's own class, with its shaders embedded as
 in the filter, measures exactly what the reference passes measure — every sequence, alone and
 giving the network its cleaned vectors — and each of its redraws shows, bit for bit, what its
-picture showed.
+picture showed. The same check puts the flow frame itself against the box computed on the CPU,
+at a whole factor and at 2/3: within one step of 8 bits on every flow pixel, which is rounding.
 
 Cost on the RTX 4060 at each *Optical Flow resolution* (`--tstabbench`, GPU time per
-picture, a moving picture, the flow's size in brackets): Optical Flow with its passes and the
-stabilizer together, and in brackets the same without the network's cleaned vectors:
+picture, a moving picture, the flow's size after it): Optical Flow with its passes and the
+stabilizer together, and in brackets the same without the network's cleaned vectors. Measured
+on 21 November 2026, when 2/3 was added:
 
-| Working size | 4 | 3 | 2 | Full |
-|---|---|---|---|---|
-| 1920×1080 | 1.18 ms (0.88), 480x270 | 1.32 ms (0.97), 640x360 | 1.75 ms (1.19), 960x540 | 3.87 ms (2.49), 1920x1080 |
-| 3840×2160 | 3.59 ms (2.66), 960x540 | 3.97 ms (3.03), 1280x720 | 5.58 ms (3.87), 1920x1080 | 13.41 ms (9.00), 3840x2160 |
+| Working size | 1/4 | 1/3 | 1/2 | 2/3 | Full |
+|---|---|---|---|---|---|
+| 1920×1080 | 1.30 ms (0.94), 480x270 | 1.42 ms (1.03), 640x360 | 1.85 ms (1.25), 960x540 | 2.42 ms (1.62), 1280x720 | 3.97 ms (2.58), 1920x1080 |
+| 3840×2160 | 3.46 ms (2.68), 960x540 | 4.06 ms (3.05), 1280x720 | 5.66 ms (3.93), 1920x1080 | 7.73 ms (5.28), 2560x1440 | 13.53 ms (9.06), 3840x2160 |
 
-The cleaned vectors cost 0.3 to 0.6 ms at 1080p and 0.9 to 1.7 ms at 2160p below Full: the
-global motion, its refinement and the block passes, the same DLSS SR runs on its own picture.
+2/3 sits between 1/2 and Full: at 2160p it costs 2.1 ms more than 1/2 and 5.8 ms less than
+Full. The cleaned vectors cost 0.4 to 0.8 ms at 1080p and 0.8 to 2.4 ms at 2160p below Full:
+the global motion, its refinement and the block passes, the same DLSS SR runs on its own picture.
 
 The CPU side stays under half a millisecond: nothing waits for the GPU. Memory: about 95 MB
 at 1080p — the history, two input copies and the result at the working size — and 375 MB at
@@ -515,6 +526,74 @@ So on this card it is for 1080p and below, and 4K DLAA is out of reach; a faster
 that line. Render ahead cannot rescue it -- it hides latency, not a pass that takes longer
 than a frame. The honest check is the statistics box: *skipped* staying at 0 and the sync
 offset staying put.
+
+**After the downscalers.** A picture larger than the screen -- a 4K film on a 1440p screen, or in
+a window -- never reached DLSS either: it only shrinks. With the same box ticked, the
+*Downscaling* method now brings it to the screen's size first, as it did, and DLSS runs on that
+at a ratio of one. It resizes nothing: the downscaler does, and DLSS only cleans what it leaves.
+The downscaled picture goes straight into DLSS's input, turned and flipped by nothing, and the
+pass after DLSS turns, flips and places it at a ratio of one. Its Optical Flow measures the
+downscaled picture. The Scaling step names both: `3840x2160 -> 2560x1440 Spline36, DLSS SR
+DLAA/M`, its time the downscaler's and DLSS's together. A picture that grows one way and shrinks
+the other is left as it was.
+
+Measured on the RTX 4060 on 21 November 2026, with `playback_test --dlaa --only 2` (DLSS SR,
+render ahead on), against the same run without `--dlaa`:
+
+| picture, shown at | Scaling step | without DLAA | optical flow | ready in | sync offset, skipped |
+|---|---|---|---|---|---|
+| 1920x1080 at 1280x720 (`--size`) | 2.2 ms | -- | 1.1 ms | 6.2 ms (3.4) | -0.6 ms, 0 |
+| 3840x2160 at 2560x1440 (`--file`, an HEVC clip) | 7.7 ms | 0.6 ms | 1.4 ms | 18.3 ms (9.5) | +2.0 ms, 0 |
+
+The 4K row is a real clip because the bench's own 3840x2160 film cannot be made at 24 fps on
+this machine, with or without DLAA: the sync offset ran out to over five seconds both ways. On
+that clip, a paused picture with DLAA lies 0.40 of a level from the one the downscaler alone
+leaves, none of its values more than 24 apart: in its place, the right way up.
+
+### DLAA after scaling, whoever scales
+
+**Apply DLAA after scaling**, in its own box on the **Scaling** tab, runs DLSS in its DLAA
+mode on the picture once it has been resized, whoever resized it: the *Upscaling* or
+*Downscaling* method, an mpv prescaler, or the video processor with or without RTX Video Super
+Resolution. It resizes nothing; it is a step after the resizing, at the size the picture is
+shown at, where DLSS 5 NR's *Apply after upscaling* also runs. It uses DLSS Super Resolution's
+session, its preset and its DLL, and so it and *Use DLSS Super Resolution* are one or the
+other: each greys the other's box, and DLSS SR's own DLAA box with it. Found ticked together
+(a registry, a preset), DLSS Super Resolution runs and its box stays live, to be unticked. The
+DLAA leaves every list of the tab as it found it -- `playback_test --greying` checks that it
+moves none.
+
+With DLSS 5 NR after the upscaling, the DLAA comes first, cleaning what the resizing left, and
+the network after it; **Run it after DLSS 5 NR** turns the order round. Where the network runs
+before the upscaling, the DLAA is after it whatever the box says, and the box is grey. The
+statistics give it a step of its own, `DLAA : DLSS SR DLAA/M at 3840x2160` with its time and
+its *motion*, in the order it runs. A picture it cannot run on -- a snapshot, a size NGX
+refused, a session that switched itself off -- goes through the step untouched.
+
+It is the most expensive way to use DLSS: a whole pass at the output size on every picture,
+after whatever the resizing already cost, which is what the note under the box says. Measured
+on the RTX 4060 on 21 November 2026 (`playback_test --dlaaafter`), each against the same run
+without it:
+
+| picture | resized by | DLAA | its optical flow | ready in | sync offset, skipped |
+|---|---|---|---|---|---|
+| 800x450 at 1280x720 | the shaders | 2.3 ms | -- | 7.3 ms (3.8) | -0.3 ms, 0 |
+| 1920x1080 at 1280x720 | the shaders, shrinking | 2.1 ms | -- | 7.7 ms | +0.7 ms, 0 |
+| 1920x800 film at 2880x1200 | the shaders / the processor / the processor with Super Resolution | 7.0 / 7.2 / 8.4 ms | -- | -- | -- |
+| 3840x2160 HEVC clip at 2560x1440 | the processor, shrinking | 7.2 ms | 1.3 ms | 17.8 ms | +1.3 ms, 0 |
+| 3840x2160 HEVC clip at 3840x2160 | nobody | 16.6 ms | 2.2 ms | 29.8 ms (10.0) | +1.8 ms, 0 |
+
+At 4K the statistics' total read 21.5 ms of the 41.7 a picture lasts, and nothing was shown
+late: on this card it fits a 23.976 fps film at 4K alone, not with DLSS 5 NR at full size as
+well. A paused 4K picture with it lies 0.32 of a level from the same without it. Whether it
+adds anything after RTX Video Super Resolution or a neural upscaler, which reconstruct the
+picture themselves, is for the eye to judge: no measure here says so.
+
+The order checks (`--afternr --nrafter`, with and without `--dlaaafternr`) put the DLAA one
+step before the network and one after it, as asked, on every run. Of seventeen runs of the
+processor enlarging before DLSS 5 NR with the DLAA after it, one showed neither the network nor
+the DLAA running and read a still far from the others; the next sixteen did not, and it was not
+seen again.
 
 **How it runs.** Unlike the NR snippet, this feature runs on Direct3D 11 through the display
 driver's NGX runtime (`_nvngx.dll`), which loads `nvngx_dlss.dll` itself: no second device,
@@ -1208,6 +1287,38 @@ measured on film frames halved from 4K, against the same frame through the proce
 it is on the control's side of the choice: with it set to *Disable* the picture goes round in
 4:4:4 and keeps what it had.
 
+**Super Resolution with nothing to enlarge, as a DLAA.** That it ran on a picture held at its
+own size raised the question the other way round: could it clean a film the screen shows at its
+own size, as DLSS does in its DLAA mode? `vp444_probe --native` asks the driver itself, with the
+renderer's own stream extension and without upstream's size check, on a film frame at five sizes
+converted at the same size, clean and with its planes coded as MPEG-2 intra blocks (RTX 4060,
+the NVIDIA app at its quality level 4, 23 November 2026):
+
+| picture | what it changes | detail (Laplacian), without -> with | coded against clean, without -> with | GPU a picture |
+|---|---|---|---|---|
+| 1920x1080 | 1.23 levels | 4.24 -> 5.76 | 38.62 -> 37.88 dB | 13 ms |
+| 2560x1440 | 1.19 levels | 3.03 -> 4.47 | 39.88 -> 39.16 dB | 22 ms |
+| 3200x1800, 3840x1600, 3840x2160 | nothing | the same | the same | nothing |
+
+The driver takes the request at every size and acts only up to 2560x1440, the size upstream's
+last level stops at: on a 4K film, scope or full frame, it does nothing at all. Below that it
+sharpens -- a third to a half more detail -- and takes nothing out of what a codec left: the
+coded picture ends further from the clean one with it than without. So there is no Super
+Resolution for a 4K film at its own size to be had from the driver, and none is offered;
+*Apply DLAA after scaling* is the way to clean one (16.6 ms a picture at 4K).
+
+Nor does it act when the processor shrinks the picture: 2560x1440 to 1920x1080 or to 1280x720,
+1920x1080 to 1280x720, nothing changed and nothing spent (`--native`'s second table). What the
+renderer asks for, though, is upstream's rule: Super Resolution on the turn that resizes, the
+level checked against the source alone, whichever way the picture goes and at the same size
+too. So a 1080p film shown at 1920x1080 by the processor, with a level of *Up to 1080p* or more,
+has it, and the driver runs it there: `playback_test --vpturns` with a 1080p H.264 clip, the
+processor's step at 13.2 ms against 0.4 without it, and the still's detail 0.0209 against 0.0191.
+The *Scaling* line used to say *SuperResolution\** only when the picture grew both ways, and so
+said nothing of it there; it now says so at the same size too, `1920x1080 -> 1920x1080 D3D11
+SuperResolution*`, its time in the processor's step. Shrunk to 1280x720, the same film's
+processor takes 0.4 ms either way, and the line says nothing, as the driver does nothing.
+
 In MPC-HC, a 1080p film at 25 fps on a television at 25Hz, RTX Video HDR on: with DLSS 5 NR
 and the processor enlarging, a picture is ready 26 ms after it arrives, and 36 to 39 ms with
 Super Resolution as well (the *Render ahead* line) -- of the 40 ms a frame lasts. That is the
@@ -1369,6 +1480,22 @@ given an 8-bit picture to write in ten bits, it writes HDR10 -- PQ, BT.2020 -- w
 space it was asked for, and the SDR swap chain showed a dim, grey picture, everything under
 115 nits. The processor is then given eight bits to write, and writes what it was asked. A
 10-bit source was never affected.
+
+It does the same on an SDR desktop under Windows' automatic colour management (*Automatically
+manage color for apps*, Windows 11 24H2 and later), and there upstream refuses Super
+Resolution whenever an 8-bit source would be written in more than eight bits -- which DLSS 5
+NR, keeping the chain in half floats, always makes it, and so does a 10-bit or 16-bit
+**Texture format**. Measured under it on an 8-bit H.264 film, the processor enlarging with
+Super Resolution: written in half floats, mean 0.026 against 0.039 without Super Resolution
+and a third of the colour; given eight bits, mean, peak and colour within 0.0005 of the
+processor's without it, and the detail Super Resolution adds kept (0.0024 against 0.0014).
+So the processor is given eight bits there too. The processor's second turn after DLSS 5 NR
+takes ten bits, which the driver writes right under it (within 0.26 of a level of the
+shaders' enlargement, `playback_test --afternr`). Up to 3.0.1 it was asked as if it took the
+source's eight bits, and from 2.4 on an 8-bit film under automatic colour management lost
+Super Resolution as soon as DLSS 5 NR was on. The Color line of the statistics says
+`ACM: On` on any display that has it, and the Scaling line says why if Super Resolution is
+still refused.
 
 ### What the driver is set to, and what it writes
 
@@ -1978,6 +2105,135 @@ filter asks before it changes a picture.
 
 ---
 
+## The HDR curve
+
+A dark scene in HDR is often too dark for a lit room, and the usual fix, a brighter picture,
+blows out the bright scene after it: a single exposure scales the shadows and the highlights
+alike. The HDR curve, on its own tab, is **Veyra**'s answer, taken with its presets: a curve on
+the light of each pixel, in nits, that raises the shadows without touching the highlights,
+moves the mid grey with the peak held where it is, and softens and caps the highlights. It
+works on every picture that leaves in HDR -- HDR10, HDR10+ (played as HDR10), HLG once
+converted, Dolby Vision once reshaped, and SDR video that RTX Video HDR turns into HDR --
+and changes nothing to one that leaves in SDR.
+
+On a pixel's light Y, in nits, in this order (`Source/HdrCurve.h`):
+
+- **Shadow lift**: Y is multiplied by 1 + w² (2^EV − 1), w = 1 − Y / range, held to 0..1:
+  the whole lift at black, none at the range and above.
+- **Mid grey**: Y = peak · (Y / peak)^g, with g such that 203 nits, the HDR reference white,
+  goes to the mid grey chosen; the peak is the cap, or 1000 nits, and does not move.
+- **Roll-off**: above its start s, Y = s + d / (1 + d / k), d = Y − s, k the room left under
+  the peak times the roll-off's per cent: at 100 % the brightest highlights approach the peak
+  and never pass it.
+- **Cap**: Y no higher than the cap; then, after the gain, no BT.2020 channel above it.
+
+The three channels get the same gain, Y's new value over its old one, so a colour keeps its
+hue. The step comes after the tone mapping and before sharpening and the dither, at the size the
+picture is shown at; subtitles and the OSD are drawn after it and are not touched. A snapshot
+(a player's *Save image*) is an SDR copy and is made without it. Its time is in Finish, and the
+statistics add a line, `HDR curve`, with the preset, the strength and the values they come to.
+
+The presets are Veyra's, written for a 1000-nit display; the roll-off's start and the cap
+follow the display's peak, multiplied by it over 1000 (×0.6 on a 600-nit display, ×2 at 2000),
+and the shadows and the mid grey do not, since they describe the film and the room. The peak
+is upstream's *Nits*, on the HDR tab for the tone mapping and on the curve's tab as well, the
+same value, since passthrough greys it on the first. The display's own report says little: it
+is what its EDID claims (8300 nits for one OLED here), not what the panel shows. A reviewer's
+measurement of a small window is the number to give it:
+
+| Preset | Shadow lift | Shadows up to | Mid grey | Roll-off from | Roll-off | Cap |
+|---|---|---|---|---|---|---|
+| Dark lift | +0.50 EV | 35 nits | 225 | -- | -- | -- |
+| Highlight guard | -- | -- | 203 | 450 | 120 % | 1000 |
+| Dark and bright | +0.50 EV | 35 nits | 220 | 450 | 120 % | 1000 |
+| Bright room | +0.30 EV | 30 nits | 250 | -- | -- | -- |
+| Dark room | +0.40 EV | 35 nits | 185 | 600 | 130 % | 800 |
+| Punch | -- | -- | 175 | 450 | 110 % | 1200 |
+
+*Strength* takes every value towards no change, 0 % doing nothing and 200 % twice as much;
+the roll-off's start moves the other way, a lower start being the stronger effect, and the
+cap, a protection, does not follow it. With a cap, the HDR10 metadata sent to the display in
+passthrough says no peak above it (MaxCLL, the mastering display's peak, MaxFALL), so that a
+display which tone maps from the metadata does not compress the highlights a second time.
+RTX Video HDR sends no metadata.
+
+`dlssnr_harness --thdrcurve` puts the shader that ships (`ps_hdr_curve.cso`) against the sum
+in double, on PQ ramps and random colours: within 1.03 steps of the half float it writes, in
+twelve cases from every preset to the ends of each range. With nothing to do, it gives the
+picture back to its last half float. The lift leaves everything at or above its range alone
+(1 step at most) and darkens nothing; no channel passes the cap; no pixel's colour moves by
+more than 0.12 % of its share. And the sum is Veyra's: the six presets at nine strengths on six
+display peaks resolve to the same 324 sets of values as Veyra's `resolveHdrTuning`, written out
+again in the suite, and the curve gives its light to 9×10⁻⁷.
+
+On the screen, read off an HDR desktop on the same paused picture with the curve and without it
+(`playback_test --hdrcurve`, *Nits* 2000):
+
+| | Shadows (under 10 nits) | Mid tones (10 to 200) | Brightest |
+|---|---|---|---|
+| The bench's film under RTX Video HDR, *Dark and bright* | 1.59 → 2.58 nits | 40.7 → 47.2 | 661 → 710 |
+| An HDR10 film peaking at 4000 nits, passthrough, *Highlight guard* | 1.60 → 1.59 | 27.8 → 27.8 | 6049 → 1909 |
+
+and the metadata of the second said 2000 nits, the cap on that display. It costs 0.3 to 0.4 ms a
+picture at 3840x2160 on an RTX 4060 (Finish 0.7 ms against 0.3 and 0.4 without it, in turns).
+
+### Tuning it to the film
+
+A preset is the same for every film, and so is RTX Video HDR's guess at an HDR picture: one
+film comes out with its shadows sunk, the next dim all through. *Auto tune*, on the HDR curve
+tab, binds a key that tunes the curve to the film playing. On the key the film pauses, the
+picture goes to sixteen places spread from 4 to 92 % of the film (the opening logos and the
+credits left out), the light the curve receives is measured at each, and the film comes back to
+the picture it was on and plays again if it was playing. The values found are kept as the
+curve's *Custom* ones at 100 %, as a preset's key keeps its preset; the key pressed again during
+it stops it and changes nothing, and so do the player's Stop and closing the film. A notice says
+how far it is, then what it found.
+
+What is measured is two histograms of the picture over PQ, its light and its brightest channel,
+taken where the curve's step reads it (`cs_hdr_tune_hist.hlsl`): after the hardware video
+processor and RTX Video HDR, after DLSS and the tone mapping, before the curve. So a second
+press with the curve on finds the same values. While the film is moved, the step is drawn for
+the measurement alone if the curve changes nothing; outside it, nothing of this runs.
+
+The values bring the film towards real HDR masters, measured with the same tool, and only by
+what the film's content does not decide on its own:
+
+- **the shadows**: how far a picture's shadows sit under its key, its log-average light, as
+  ln(key / 10th percentile). A dark scene graded well has its shadows as far under its own key
+  as a bright one. Where the film's are deeper than the masters' by more than their spread, the
+  shadows are lifted three quarters of the way back, one EV at most, the lift fading out at twice
+  the film's key so that the mid tones hardly move;
+- **the mid grey**: the film's key over its sixteen pictures, which its content does move, so
+  only where it is far from the masters' (beyond their spread), three quarters of the way, as a
+  power of 0.9 to 1.1 and half an EV at most at the key;
+- **the highlights**: no master needed. Where the film's peak (the second brightest place's, all
+  but 0.05 % of its pixels) does not fit the display's, the cap is the display's peak and the
+  roll-off starts at BT.2390's knee for the two, its peak landing at 95 to 99 % of the cap: 4000
+  nits on an 800-nit display start at about 360. What fits is not limited;
+- **a guard**: the pictures' contrast, ln(p90 / p10), keeps 85 % of the film's at least -- light
+  given to a colour also raises its colourfulness, and a flatter picture reads as washed out --
+  the lift taken back first, then the mid grey.
+
+The targets come from six HDR10 and Dolby Vision masters of 30 to 40 s each, sixteen pictures
+each in passthrough (`playback_test --hdrtunescan`, read by `hdr_tune_targets.py`): a depth of
+2.36 and a key of 2.35 nits, all 96 pictures as one film, with bands of 0.46 and 0.71 (ln), half
+the interquartile range of the six taken one at a time. Thirty seconds of a film are a scene or
+three, further apart than whole films would be, so the bands are wide: the darkest of the six
+(depth 3.62, key 0.89 nits) and the brightest (key 6.84) are themselves moved, the four others
+not, but for the roll-off of what an 800-nit display cannot show.
+
+| On an RTX 4060, *Nits* 2000 | Places | Time | Depth | Key | Found |
+|---|---|---|---|---|---|
+| The bench's film under RTX Video HDR | 16 of 16 | 3.2 s | 2.95 → 2.66 | 1.31 → 1.70 nits | lift +1.00 EV to 3 nits, the rest left alone |
+
+Sixteen paused seeks took 3.3 s on that film and 4.9 to 14.9 s on the masters (`playback_test
+--seektime 16`), the 4K AV1 the slowest; the moves stop at 22 s so that the tune is over within
+30. The film came back to its picture to the millisecond each time. In a real MPC-HC, the key
+pressed as a user presses it, the curve was kept and the player's own record of where the film
+was when it closed agreed with the film having come back and played on.
+
+---
+
 ## Render ahead
 
 The renderer wakes up 8 ms before a picture's time and only then processes it, so whatever
@@ -2019,9 +2275,9 @@ skipped pictures:
 
 Without DLSS the same film measures −7.2 ms (−8…−6). A first version waited for the GPU before
 presenting; at 29.97 fps that took the time from the next picture and skipped 25 of them in
-20 s. At 29.97 fps most pictures are counted *late* below: the GPU finishes DLSS SR a moment
-after the present time, because the source cannot hand over a picture earlier than a frame
-minus its own time. Render ahead does not make the chain faster than the video: at 50 or 60 fps
+20 s. At 29.97 fps most pictures are counted *after Present* below: the GPU finishes DLSS SR a
+moment after the present time, because the source cannot hand over a picture earlier than a
+frame minus its own time. Render ahead does not make the chain faster than the video: at 50 or 60 fps
 with DLSS 5 NR pictures are still skipped, as they were.
 
 The statistics show where the time goes and what render ahead does (see *Reading the
@@ -2031,13 +2287,29 @@ statistics* for the rest):
         stabilizer: 100, Optical Flow 960x540, vectors to DLSS                   2.0
     3 Scaling     : 1920x1080 -> 3840x2160 DLSS SR Perf/M                        6.1
         motion    : Optical Flow, global motion                                  1.8
-    Render ahead  : asked  42 ms early, ready in  30.6 (max  31.3), 8 not in time
+    Render ahead  :  42 ms early, ready in  30.6 (max  31.3), 8 after Present
+
+*ms early* is how much earlier than usual a sample is asked for. It is measured, not set: the
+slowest of the last 32 pictures and 3 ms to spare (never more than a frame), plus how long
+before its time a picture is presented, less the 8 ms the DirectShow renderer gives already. It
+rises at once when a picture is slow and falls by a quarter of a millisecond a picture. While a
+hiccup that may get an interpolated frame is waiting, the sample is asked for a refresh and
+EchoFG's time earlier still, which this figure leaves out.
 
 *ready in* is the whole picture, from the start of processing to the GPU being done: the mean
-and the slowest of the last 32. *not in time* counts pictures the GPU had not finished at their
-present time. A few at start-up are normal; a count that keeps growing means the chain barely fits the
-frame rate, and a lighter DLSS SR preset gives it room. DLSS 5 NR is timed where the renderer
-waits for it, the other steps with GPU timestamps while the statistics are shown.
+and the slowest of the last 32. *after Present* counts the pictures the GPU was still finishing
+when Present was called. That is not late: Present is called ahead of the refresh the picture
+is for, and a picture finished a little after the call is still shown on it. The pictures late
+on the screen are the *shown late* of the *On screen* line, and while that stays at 0 these
+cost nothing. For one of them, *ready in* stops at the call, so the *max* can be that limit
+rather than the picture's own time: about 33 ms, two refreshes at 60Hz, for the film below.
+
+A count that keeps growing means the chain barely fits, and asking for the samples earlier
+does not help: a picture is only started once the one before it has left. A 23.976 fps film
+on a 60Hz screen shows its pictures for two refreshes and three by turns, so every other one
+has 33.3 ms to be drawn, whatever render ahead asks. A lighter chain gives it room, and so does
+the screen in its 23.976Hz mode, where each picture has 41.7 ms. DLSS 5 NR is timed where the
+renderer waits for it, the other steps with GPU timestamps while the statistics are shown.
 
 ### A film at the screen's own rate
 
@@ -2433,8 +2705,8 @@ waiting in a 3:2 cadence also had no use for a cut on a 3, which is every other 
 
 24, 25 and 30 fps on 60Hz are left as they are, and so is any rate the screen is not a little
 faster than. It needs render ahead, which schedules every picture; the line *Frame sync* in the
-statistics says which is in force, and *Hiccups* counts the slips taken on a cut, the forced ones
-and the made pictures.
+statistics says which is in force, and *Hiccups* counts how the slips ended: on a cut, covered by
+an interpolated frame, or visible.
 
 **The cuts** are found by the detector DLSS Super Resolution drops its history on
 (`cs_dlss_scene_cut.hlsl`, *DLSS SR at a cut*), with the thresholds it was chosen with, run here on
@@ -2713,7 +2985,7 @@ and was not the fault: the pointer stayed exactly as before.
 
 ## Settings
 
-All the settings are on one page of the renderer's properties, in eight tabs, and are stored
+All the settings are on one page of the renderer's properties, in nine tabs, and are stored
 under `HKCU\Software\MPC-BE Filters\MPC Video Renderer Plus`, apart from the original
 renderer's (*In MPC-BE and in MPC-HC*). Each tab opens on a line saying what it
 is for, and each control has a tooltip saying what it does, when it applies and what it needs.
@@ -2756,7 +3028,9 @@ One thing resizes the picture: DLSS Super Resolution if it is ticked, the video 
 | Use a lighter filter for small enlargements | off, Jinc2m | Under 5 % on both sides, a slightly cropped 4K film on a 4K screen for instance, the method in the list beside it is used instead: a network costs as much there as for a large enlargement, for nothing visible. The statistics name the method really in use |
 | Downscaling | Hamming | Reduces when the shaders resize. Ordered best first (`--tdownscale`, see *Spline36, and what a downscaler is for*): Lanczos, Bicubic sharp and Spline36 are close |
 | Use DLSS Super Resolution for upscaling | off | Enlarges with DLSS Super Resolution, in place of the video processor and of the Upscaling method, which greys; it cleans grain and compression noise too. Up to 4 times; the Upscaling method finishes a larger enlargement. Works with or without DLSS 5 NR. Experimental (see *DLSS Super Resolution*): moving subjects can still shimmer on grainy film |
-| Also run when no enlarging is needed (DLAA) | off | DLSS runs on a picture already at the screen's size, rebuilding it without enlarging it. A whole pass at the output size: 70 ms a frame at 4K on an RTX 3050, 14 ms at 1080p. Needs *Use DLSS Super Resolution* |
+| Also run when no enlarging is needed (DLAA) | off | DLSS runs on a picture already at the screen's size, rebuilding it without enlarging it, and on a larger one once the *Downscaling* method has brought it to the screen's size. A whole pass at the output size: 70 ms a frame at 4K on an RTX 3050, 14 ms at 1080p; 7.7 ms at 2560x1440 after the downscaler on an RTX 4060. Needs *Use DLSS Super Resolution* |
+| Apply DLAA after scaling | off | DLSS's DLAA on the picture once resized, whoever resized it -- the shaders, a prescaler, the video processor with or without RTX Video Super Resolution -- at the size it is shown at. GPU heavy: 16.6 ms a picture at 4K on an RTX 4060. One or the other with *Use DLSS Super Resolution*; uses its preset and its DLL. See *DLAA after scaling, whoever scales* |
+| Run it after DLSS 5 NR | off | With DLSS 5 NR after the upscaling, the DLAA after the network instead of before it. Live only then |
 | Preset | Automatic | The DLSS model: J and K are DLSS 4's, L and M DLSS 4.5's; Automatic lets DLSS choose for the ratio. Applies on the next picture |
 | DLL | empty | `nvngx_dlss.dll` or its folder. Empty means search next to the filter and up |
 
@@ -2787,7 +3061,7 @@ One thing resizes the picture: DLSS Super Resolution if it is ticked, the video 
 | Toggle key | F12 | Switches DLSS 5 NR on and off during playback. The filter swallows this key; *None* gives no shortcut |
 | DLL | empty | Empty means search the locations listed above |
 | Temporal stabilizer: Strength | 100 | 0–100. Where the history is trusted, the current picture weighs from 1 down to 0.25 at 100, the measured setting. Its Optical Flow also gives the network its motion vectors, cleaned as DLSS SR's are, whatever the strength above 0. 0 runs nothing, vectors included. Applies live |
-| Optical Flow resolution | Auto | 1/4, 1/3, 1/2, Full or Auto: the fraction of the working picture Optical Flow measures its motion on. Auto takes 1, 2 or 4 from the working height for about 540 lines, as before the slider existed. See *A working size below the picture's* for what it changes. Applies on the next picture |
+| Optical Flow resolution | Auto | 1/4, 1/3, 1/2, 2/3, Full or Auto: the fraction of the working picture Optical Flow measures its motion on. Auto takes 1, 2 or 4 from the working height for about 540 lines, as before the slider existed. See *A working size below the picture's* for what it changes. Applies on the next picture |
 | Style | Default | Default / Natural / Cinematic. Applies live |
 | Preset | 0 | **No effect with the DLL builds seen so far** — they ship a single network and every preset falls back to it |
 | Auto mask | on | The network finds skin (faces, hands) by itself and gives it *Skin detail* rather than *Detail*. Off, the whole picture is treated alike and *Skin detail* does nothing: on a 1950 film, the output without it measured the same with Skin detail at 0, 0.50, 0.90 and 2.00, and with it the network changed a face by 19 thousandths of luma more at the defaults (`--tautomask`) |
@@ -2818,6 +3092,24 @@ key, both DLL paths, and the working size, which is what the card can carry.
 | SDR brightness | 125 nits | The target of that conversion, 25 to 400. Applies as the slider is dragged |
 | RTX Video HDR | off | The NVIDIA driver turns SDR video into HDR. Needs HDR output on Passthrough or a tone map method, an HDR display with Windows HDR on, an RTX card, the 64-bit filter, a bit depth other than 8-bit and a format the video processor converts. The statistics star it (`RTX Video HDR*`) while it runs. The driver leaves out a picture the processor writes in fewer than 640x360 pixels, and the line then adds `left out by the driver under 640x360`; where the shaders resize, the processor first enlarges such a picture just past that, which the Processor step says (`to 740x312 for RTX Video HDR`) -- see *RTX Video HDR on a small picture*. The driver applies it only when the NVIDIA app has it on, as bright as the app says: the statistics give both, and what the driver wrote (*What the driver is set to, and what it writes*) |
 | Start over at a scene cut | off | Beside *Measured peak*. The measured peak, of the tone mapping (*Measured peak*) and of the conversion to SDR (*Measured*), is smoothed over three seconds; with this, a jump in the mean brightness is taken for a cut and the smoothing starts over, so that the new scene's peak is used from its first picture (`SdrPeakSceneCuts`, upstream's registry-only value, on the page since 3.0). A cut that changes the highlights and not the mean is not seen as one; a one-frame flash is drawn with its own peak and leaves the smoothing alone. Available while one of the two measurements is in use; not carried by a preset (see *Following the peak*) |
+
+### HDR curve
+
+See *The HDR curve*. Direct3D 11 and Windows 10; it changes nothing to a picture that leaves in SDR.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Adjust the light of HDR pictures | off | A curve on the light of every picture sent in HDR: HDR10, HDR10+, Dolby Vision, and SDR video turned into HDR by RTX Video HDR. After the tone mapping, before sharpening; subtitles and the OSD are not touched. Registry `HdrCurve` |
+| Preset | Custom | Veyra's: *Dark lift*, *Highlight guard*, *Dark and bright*, *Bright room*, *Dark room*, *Punch*, written for a 1000-nit display and scaled to the display's peak below; *Custom* applies the values as typed. Choosing one shows its values; typing a value makes it *Custom*. Registry `HdrCurvePreset` |
+| Strength | 100 % | 0 changes nothing, 200 % does twice as much; the cap does not follow it. Applies as the slider is dragged, a per cent at a time. Registry `HdrCurveStrength` |
+| Display peak | 1000 nits | The display's real peak: the same setting as *Nits* on the HDR tab, written into it as it is typed, and here because passthrough greys that one while the curve uses it. The presets' roll-off and cap are scaled by it over 1000. Registry `HdrDisplayNits`, upstream's |
+| Shadow lift | 0 | In hundredths of an exposure value, −200 to 200: 100 doubles the darkest parts, a negative value darkens them. Registry `HdrCurveShadowLift` |
+| Shadows up to | 10 nits | Where the lift has faded out, 1 to 100; nothing brighter moves with it. Registry `HdrCurveShadowRange` |
+| Mid grey | 203 nits | Where the mid grey goes, 100 to 500, the peak held: 203, the HDR reference white, changes nothing. Registry `HdrCurveMidGrey` |
+| Highlights roll off from | 0 (none) | Where the highlights start to be softened, 100 to 2000 nits. Registry `HdrCurveHighlightStart` |
+| Roll-off | 100 % | 10 to 200: at 100 the brightest highlights approach the cap, or 1000 nits, and never pass it. Registry `HdrCurveRollOff` |
+| Peak cap | 0 (none) | The brightest the picture may be, 100 to 4000 nits, with no colour above it. The HDR10 metadata then says no more than the cap. Registry `HdrCurvePeakCap` |
+| Auto tune key | None | A key, with what is held with it, that tunes the curve to the film playing (*Tuning it to the film*) and keeps what it found as the values above, *Custom*, at 100 %. Not taken by a preset, and refused when the DLSS 5 NR toggle or a preset has it. Needs HDR output. Registry `HdrCurveTuneKey`, in no preset |
 
 ### Presentation
 
@@ -2909,7 +3201,7 @@ RTX 4060 (`playback_test --file <film> --window 3840x2160 --only 4`):
       Total       : for a frame of 40.0 ms                                      28.1
     -- Timing ----------------------------------------------------------------------
     Clock         : Audio renderer
-    Render ahead  : asked  42 ms early, ready in  30.6 (max  31.3), 8 not in time
+    Render ahead  :  42 ms early, ready in  30.6 (max  31.3), 8 after Present
     CPU (ms)      : copy   0.2, draw  19.8, wait  25.9, Present   0.1
     Swap chain    : Flip discard, R10G10B10A2_UNORM, 3 buffers
     Frame sync    : a refresh chosen for each picture
@@ -2929,6 +3221,7 @@ steps work in.
 | Convert | The shaders convert the picture instead, with the chroma method named, a chroma prescaler's time included |
 | DLSS 5 NR | The network's tuning, or why it is not running. *working* is the reduction and the composition at a working size below the picture's; *stabilizer* its Optical Flow and the stabilizer. The network runs on a Direct3D 12 device of its own and is timed there, by timestamps on its queue |
 | Scaling | From what size to what size, and what does it, with all it costs: the processor's second turn after DLSS 5 NR, DLSS SR and its *motion*, or an mpv prescaler, each with the resize shader that finishes the job. `SuperResolution*` when the driver's Super Resolution runs, and `(No Super Resolution when chroma by shaders)` when it was asked for on a 4:4:4 picture. When the processor resized in its own step, a time here is only the resize shader copying the picture to its place -- a film with black bars, or one in a window -- and the line says `placed by the shaders`: 0.5 ms for a 2.39:1 film on a 4K screen, which is not Super Resolution's (that is in the processor's time). With *DLSS SR* ticked and not enlarging, a sub-line says why |
+| DLAA | *Apply DLAA after scaling*: DLSS's DLAA at the size the picture is shown at, its mode and preset, with its Optical Flow as *motion* under it. Before DLSS 5 NR after the upscaling, or after it with *Run it after DLSS 5 NR*. Asked for and not running, it says why |
 | Finish | What runs at the size the picture is shown at: a correction, the tone mapping, the sharpening and its level, the player's shaders, the dither |
 | Cadence | With *Hide the 60Hz hiccup on scene changes*: the picture copied out of the back buffer and measured for a scene change, every picture while a hiccup may come. Under it, *EchoFG* is the interpolated frame (*Otherwise, show an interpolated frame*): the median of its last five times on the GPU, each brought to the GPU's clock of the moment, which decides whether one is made, and not in the total, since it is made every few seconds and not for every picture |
 
@@ -2945,7 +3238,10 @@ to SDR is in Finish's. **HDR measured** follows it while the peak is measured (*
 or the *Measured* method of the conversion to SDR): the brightest of the last picture measured
 and the peak the curve was given, smoothed over the window. The GPU measures the picture just
 before the correction or the tone mapping reads it, so that time is in Finish's too.
-**NVIDIA app**, **RTX HDR set** and **RTX HDR out** say what the NVIDIA app has the driver do
+**HDR curve** gives the curve's preset and strength and the values they come to on this
+display, and the peak the HDR10 metadata now says where a cap lowered it; `changes nothing
+here` where the picture leaves in SDR. Its time is in Finish's, which names it (see *The HDR
+curve*). **NVIDIA app**, **RTX HDR set** and **RTX HDR out** say what the NVIDIA app has the driver do
 with RTX Video and what the driver wrote (see *What the driver is set to, and what it writes*).
 
 **The timing**, in the order it happens to a picture. Its figures change with every picture,
@@ -2955,8 +3251,8 @@ as they change:
 - *Clock*: whose clock every picture is scheduled against, normally the audio renderer's.
 - *Render ahead* (see *Render ahead*): how early a sample is asked for, how long a picture then
   takes from its sample to the GPU being done with it (the mean and the slowest of the last 32,
-  CPU and waits included, so above the total), and how many were not done at their present
-  time.
+  CPU and waits included, so above the total), and how many the GPU was still finishing when
+  Present was called, which is not late on the screen.
 - *CPU (ms)*: the last picture on the render thread. *copy* hands the sample to the GPU,
   *draw* issues every step, DLSS 5 NR's included, which it no longer waits for (it did
   until the two devices waited for each other on the GPU), *wait* is the wait for the moment to
@@ -2966,11 +3262,17 @@ as they change:
   what decides when each picture is presented.
 - *Sync offset* and *On screen*: see *A film at the screen's own rate* and *A refresh chosen
   for every picture*. *Video delay* follows them when one is set.
-- *Hiccups*, with the hiccup hidden on scene changes: how many of the cadence's slips went on a
-  scene change, how many did `not` -- no scene change came in time, and the slip was taken where
-  the cadence put it, seen as before -- and in brackets how many of those an interpolated frame
-  covered and how many interpolated frames came out `too late` and were left out:
-  `Hiccups : 9 on scene changes, 2 not (1 interpolated)`.
+- *Hiccups*, with the hiccup hidden on scene changes. A hiccup is a refresh more, not a picture
+  lost: a 23.976 fps film on a 60Hz screen has to give one of its pictures a refresh more every
+  8.3 s or so to stay with the sound. The line says how each ended: on a scene change, where it
+  does not show; covered by an interpolated frame, made between the two pictures for that
+  refresh; or `visible`, no scene change having come in time and no interpolated frame being
+  had, so the picture before stayed on the screen a refresh more, which a nearly still shot
+  hides. In brackets, how many of the visible ones had an interpolated frame that the GPU had
+  not finished by its refresh: shown, it would have come a refresh late and made it worse, so it
+  was left out (`too late`). The others had no time to be made at all. With *Otherwise, show
+  an interpolated frame* unticked there are no interpolated ones:
+  `Hiccups : 9 on scene changes, 1 interpolated, 1 visible`.
 - *Frames*: the samples received, those the renderer left undrawn for coming too late, the
   second fields of a deinterlaced picture left out, and the pictures that failed; *turns lost*
   and *turns late* when a picture's turn in the renderer was taken away or came late, the
@@ -3132,7 +3434,7 @@ dlssnr_harness.exe --tstabport    the filter's stabilizer class against those pa
 dlssnr_harness.exe --tstabbench   what the stabilizer costs at 1080p and 2160p, at each Optical Flow divider,
                                   with the network's cleaned vectors and without
 dlssnr_harness.exe --tnrscale     DLSS 5 NR at a working size: each way of carrying its change back, and the cost
-                                  (--nrflow N: the stabilizer's Optical Flow at N working pixels per flow pixel)
+                                  (--nrflow N: the stabilizer's Optical Flow at N working pixels per flow pixel, 1.5 for 2/3)
 dlssnr_harness.exe --tpipeline    the whole DLSS chain as the renderer runs it: CPU and GPU time per stage
 dlssnr_harness.exe --tsr          DLSS Super Resolution: bring-up, presets, scales, costs, NR next to it
 dlssnr_harness.exe --tsrq         DLSS SR against the resize shaders on moving film frames
@@ -3227,8 +3529,10 @@ packing into AYUV and Y410 is exact, `--views` which bind flags still make an in
 `--hdrconv` which conversions the processor declares. `--after` is the processor's second
 turn, after DLSS 5 NR: a picture written back from R'G'B' by the filter's own shaders, in P010
 and in Y410, SDR and PQ -- whether the processor takes it, how exact the trip is, whether
-Super Resolution acts on it, and what a second trip costs a film frame. The numbers quoted in
-the chroma section above come from it.
+Super Resolution acts on it, and what a second trip costs a film frame. `--native [png]` is
+Super Resolution with nothing to enlarge, on a processor of its own that asks for it without
+upstream's size check: at what sizes the driver acts, what it changes, whether it takes out
+what a codec left, and what it costs. The numbers quoted in the chroma section above come from it.
 
 **The pacing trace, and `pacing_report.py`** — what became of every picture on its way to the
 screen, in any player. Set the environment variable `MPCVR_PACING_TRACE` to a file name before
@@ -3383,10 +3687,16 @@ filter may then switch the display's own HDR state, which is not what is being m
 playback_test.exe [--seconds 20] [--size 800x450] [--window 1280x720] [--fps 23.976] [--only N]
 playback_test.exe --scalers       each Upscaling and Chroma upsampling method (--vp: hardware)
 playback_test.exe --greying       what the page greys, for every state the renderer can be in and each DLSS box
-playback_test.exe --afternr --file <mkv> --seek 1740   who enlarges after DLSS 5 NR, on one still of a real film
+playback_test.exe --afternr --file <mkv> --seek 1740   who enlarges after DLSS 5 NR, on one still of a real film (--nrafter: the network after the upscaling)
 playback_test.exe --vpturns --file <film> --rtxhdr 1 --hdrout 1   the shaders, the processor, the processor with Super Resolution: one still each, read off the desktop unclipped (vpturns_N.pfm)
 playback_test.exe --file <film> --hdrtm 7 --measurepeak 1   HDR output: -1 off, 0 passthrough, 1..7 a tone mapping; --dovitm 0|6, --sdrtm 0..2, --tosdr, --prefdovi
 playback_test.exe --file <film> --aftergrab   the same paused picture on the screen before and after GetCurrentImage (a player's Save image)
+playback_test.exe --file <film> --hdrcurve N   the HDR curve with preset N (1..6): its step in the statistics, and the same paused picture off an HDR desktop with it and without it
+playback_test.exe --file <film> --hdrtune   the curve tuned to the film as its key does it, then again measuring only: the places, the time, the film back on its picture and playing, the values in the filter and the registry, the same twice (the registry put back)
+playback_test.exe --file <film> --hdrtunescan   the tune measuring only: each place's percentiles, key and peak, for hdr_tune_targets.py
+playback_test.exe --file <film> --cancelat S | --playat S | --stopat S   the tune stopped by its key, by the player's Play, by its Stop with the graph let go at once (the tune's thread looked for after)
+playback_test.exe --file <film> --bykey   the tune started by Ctrl+F9 pressed with SendInput, the window in front
+playback_test.exe --file <film> --seektime N   N paused seeks over the film, exact and to the key frame, each timed
 playback_test.exe --hz 30 --fps 30 --jolt   a film at the screen's own rate, and the queue it builds
 playback_test.exe --presets     two presets saved, each recalled by its key while it plays
 playback_test.exe --rewindow    the video window made again from another thread, and whose it is
@@ -3398,12 +3708,21 @@ dlssnr_harness.exe --tdither     the dither before output: the final passes that
                                  moved, what rounding, the dither and ten-bit textures leave of a ramp, and what half
                                  floats cost at 4K (--study: pictures for CAMBI)
 dlssnr_harness.exe --ttonemap    the measured peak HDR tone mapping follows, against libplacebo's, across cuts
+dlssnr_harness.exe --thdrcurve   the HDR curve: the shader that ships against its sum, what it keeps, and the sum
+                                 against Veyra's for every preset, strength and display peak
+dlssnr_harness.exe --thdrtune    its tune: the measuring shader that ships against the CPU's bins, the percentiles
+                                 against exact ones, and the sums on made-up films (left alone at the targets, the
+                                 knee, the bounds, the curve monotonic, nothing turned back)
+python hdr_tune_targets.py <log>...   the tune's targets and bands from --hdrtunescan reports of HDR masters, and
+                                 where another film stands against them
 dlssnr_harness.exe --tupscale|--tdownscale --mpvextra <dir>   more mpv shaders, translated by mpv_shaders.py, beside
                                  the ones measured: candidates kept out of upscalers\hlsl and of the battery
 playback_test.exe --scalers --size 1920x1038 --window 2496x1349   every upscaler at a small ratio
 playback_test.exe --sharpencal --file <film> --window 3200x1334 --vpscale 0 --calup 5   each sharpener's gain in detail against its strength, and its levels read back
 playback_test.exe --scalers --size 3836x2160 --window 3840x2160 --small 5   the stand-in under 5 %
 playback_test.exe --dlaa --size 1920x1080 --window 1920x1080   DLSS SR with nothing to enlarge
+playback_test.exe --dlaaafter [--dlaaafternr]   DLAA after whoever resized, DLSS SR off; checks its step
+                                  is there, gives way to DLSS SR, and keeps its order with DLSS 5 NR
 playback_test.exe --mainpage 10 --hover 1042   the tip that comes up on a control, greyed or not
 playback_test.exe --mainpage 10   the settings page for 10 s, --click <id> clicks one control
 playback_test.exe --mainpage 10 --section 4   on one of the seven tabs; --apply presses Apply
@@ -3530,6 +3849,11 @@ were the anchors it was measured against.
 at revision 8d3eac3 (`github.com/Echo-Storm/ls-addon-manager`), Copyright (c) 2026 Echo-Storm and
 andreiday, under the **MIT** licence, whose text is in `Source/FrameGen/echo/EchoStorm-LICENSE.txt`;
 its notice travels with each file. Here they make the picture a cadence slip adds.
+
+**The HDR curve** (`Source/HdrCurve.h`, `Shaders/d3d11/ps_hdr_curve.hlsl`) is **Veyra**'s
+(`github.com/Likely7/Veyra-NRVideo`, GPL-3.0, commit c663312: `include/veyra/engine/HdrOutputTuning.h`,
+`shaders/PresentBlit.hlsl`): the curve, its presets, and how the strength and the display's peak
+resolve them, written again for this renderer's PQ BT.2020 picture.
 
 `Source/DLSS/NvOF/` holds the two interface headers of the NVIDIA Optical Flow SDK 5.0.7,
 copied unchanged. Each carries its own permission notice ("This copyright notice applies to

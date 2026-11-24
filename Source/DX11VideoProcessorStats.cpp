@@ -179,9 +179,11 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		std::wstring text = std::format(L"D3D11 VP to {}", DXGIFormatToString(m_D3D11OutputFmt));
 		if (bSubsampled && !m_bChromaReplacedVP) {
 			// Asked for and not done: interlaced pictures have come, and this driver
-			// deinterlaces NV12 alone (ChromaToShaders); or a format it does not take.
+			// deinterlaces NV12 alone (ChromaToShaders); or the pass written for this
+			// source and method did not compile; or a format it does not take.
 			text += !m_bVPReplaceChroma ? L", converts chroma"
 				: (m_bInterlaced && m_bInterlacedSeen) ? L", converts chroma (interlaced pictures)"
+				: m_bChromaPassFailed ? L", converts chroma (its 4:4:4 pass did not compile)"
 				: L", converts chroma (not replaced in this format)";
 		}
 		if (bVPResizesHere && bResized) {
@@ -250,9 +252,10 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 			? std::format(L"{}x{} r{}°> {}x{}", fromW, fromH, m_iRotation, dstW, dstH)
 			: std::format(L"{}x{} -> {}x{}", fromW, fromH, dstW, dstH);
 		// DLSS SR names itself in the shader names, DLAA included, which runs at no change of size.
+		// After the downscalers the names are theirs, and DLSS SR follows them on the line.
 		const auto IsDlssSR = [](const wchar_t* name) { return name && !wcsncmp(name, L"DLSS SR", 7); };
 		const bool bDlssSR = m_bDlssSRActive && m_DlssSR.IsFeatureReady()
-			&& (IsDlssSR(m_strShaderX) || IsDlssSR(m_strShaderY));
+			&& (IsDlssSR(m_strShaderX) || IsDlssSR(m_strShaderY) || m_bDlssSRDownscaled);
 		double extra = -1;
 		if (bResized || bDlssSR) {
 			// With DLSS Super Resolution on, the video processor never scales, and the
@@ -270,6 +273,9 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 						text.append(L" (No Super Resolution when chroma by shaders)");
 					} else if (bSecondTurn ? m_bVPScaleSuperRes : m_bVPUseSuperRes) {
 						text.append(L" SuperResolution*");
+					} else if (m_iVPSuperRes != SUPERRES_Disable && !VPSuperResAllowed(bSecondTurn ? 10 : m_srcParams.CDepth)) {
+						// Upstream's refusal, which nothing else on the screen explains.
+						text.append(L" (No Super Resolution under ACM, the chain wider than 8 bits)");
 					}
 				}
 				// On its first turn the processor resizes in the call that converts, and
@@ -284,12 +290,26 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 					text.append(L", placed by the shaders");
 				}
 			} else if (bDlssSR) {
+				// The Downscaling method first, when it brought the picture to the screen's size.
+				if (m_bDlssSRDownscaled) {
+					text += L' ';
+					if (m_strShaderX) {
+						text.append(m_strShaderX);
+						if (m_strShaderY && m_strShaderY != m_strShaderX) {
+							text += L'/';
+							text.append(m_strShaderY);
+						}
+					} else if (m_strShaderY) {
+						text.append(m_strShaderY);
+					}
+					text += L',';
+				}
 				// Its quality mode and preset, DLAA among them: the last word of its own line.
 				const std::wstring sr = m_DlssSR.GetStatsLine();
 				const size_t space = sr.rfind(L' ');
 				text += L" DLSS SR ";
 				text.append(space == std::wstring::npos ? sr : sr.substr(space + 1));
-				extra = Ms(CGpuStageTimes::SR);
+				extra = Sum(Ms(CGpuStageTimes::SR), Ms(CGpuStageTimes::SRDownscale));
 			} else {
 				text += L' ';
 				if (m_strShaderX) {
@@ -305,6 +325,14 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 					extra = Ms(CGpuStageTimes::MpvLuma);
 				}
 			}
+		} else if (bVPResizesHere && m_bVPUseSuperRes && !m_bChromaReplacedVP) {
+			// Nothing to resize, and the driver's Super Resolution runs all the same: upstream
+			// asks for it on the turn that resizes whatever the sizes, the level checked
+			// against the source alone, and the driver acts on a picture at its own size up
+			// to 2560x1440 -- a 1080p film at 1920x1080, the processor's step 13.2 ms against
+			// 0.4 without it (playback_test --vpturns), its time in that step. Shrinking it
+			// does not (vp444_probe --native), which is why only the same size says so.
+			text.append(L" D3D11 SuperResolution*");
 		}
 		Step(L"Scaling", text, Sum(extra, Ms(CGpuStageTimes::Resize)));
 		if (bDlssSR && !m_strDlssSRMotion.empty()) {
@@ -315,7 +343,35 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		}
 	}
 
+	// DLAA after the resizing, at the size the picture is shown at, in the order it runs:
+	// before DLSS 5 NR after the upscaling, or after it when asked to. Ticked and not
+	// running, the step says why, as DLSS SR's does.
+	const auto DlaaStep = [&]() {
+		if (!m_bDlaaAfterScaling || m_bDlssSR) {
+			return;
+		}
+		if (m_bDlaaAfterActive && m_bDlaaAfterRan && m_DlssSR.IsFeatureReady()) {
+			// Its mode and preset, the last word of DLSS SR's own line, and the size it runs at.
+			const std::wstring sr = m_DlssSR.GetStatsLine();
+			const size_t space = sr.rfind(L' ');
+			const Tex2D_t* pOut = m_DlssSR.GetOutput();
+			Step(L"DLAA", std::format(L"DLSS SR {} at {}x{}", space == std::wstring::npos ? sr : sr.substr(space + 1),
+				pOut->desc.Width, pOut->desc.Height), Ms(CGpuStageTimes::SR));
+			if (!m_strDlssSRMotion.empty()) {
+				SubStep(L"motion", m_strDlssSRMotion, Ms(CGpuStageTimes::SRMotion));
+			}
+		} else {
+			Step(L"DLAA", DlssSRSupportedHere() ? m_DlssSR.GetStatsLine() : std::wstring(L"not available on this adapter"), -1);
+		}
+	};
+	const bool bNRAfterUpscale = m_bDlssNR && m_bDlssNRAfterUpscale;
+	if (!(m_bDlaaAfterNR && bNRAfterUpscale)) {
+		DlaaStep();
+	}
 	DlssNRSteps(true);
+	if (m_bDlaaAfterNR && bNRAfterUpscale) {
+		DlaaStep();
+	}
 
 	// Everything after the resize, at the size the picture is shown at.
 	{
@@ -331,6 +387,11 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		}
 		if (m_pPSHDR10ToneMapping) {
 			Add(L"tone mapping");
+		}
+		if (m_bHdrCurveStep) {
+			Add(m_bHdrCurveRan ? L"HDR curve" : L"HDR curve (copied: not HDR now)");
+		} else if (m_bHdrTuneStep) {
+			Add(L"HDR curve tune, measuring");
 		}
 		if (m_pPSSharpen) {
 			Add(std::format(L"{} {}", m_iSharpen == SHARPEN_UnsharpClamp ? L"Unsharp + Clamp"
@@ -399,6 +460,26 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		}
 		Line(L"  HDR", hdr, -1, false);
 	}
+	// The HDR curve as it is applied: the preset and the strength, the values they come to
+	// on this display, and the peak the HDR10 metadata now tells the display. Its time is in
+	// Finish.
+	if (m_bHdrCurve && (m_bHdrCurveStep || !m_strStatsHDR.empty())) {
+		const HdrCurve::Values v = HdrCurve::Applied(m_iHdrCurvePreset, m_HdrCurveValues, m_iHdrDisplayMaxNits, m_iHdrCurveStrength);
+		std::wstring text = std::format(L"{} {}%: lift {:+.2f} EV to {} nits, mid grey {}", HdrCurve::PresetName(m_iHdrCurvePreset),
+			m_iHdrCurveStrength, v.liftEv100 / 100.0, v.rangeNits, v.midGreyNits);
+		if (v.startNits) {
+			text += std::format(L", roll-off from {} ({}%)", v.startNits, v.rollOffPercent);
+		}
+		if (v.capNits) {
+			text += std::format(L", cap {}", v.capNits);
+		}
+		if (!m_bHdrCurveStep) {
+			text += L"; changes nothing here";
+		} else if (m_uHdrCurveSentCap) {
+			text += std::format(L"; metadata says {} nits", m_uHdrCurveSentCap);
+		}
+		Line(L"  HDR curve", text, -1, false);
+	}
 	// Upstream's Measured method: the brightest of the last picture measured, and the peak
 	// the curve was given, smoothed over the window. Read back a picture or two late, never
 	// waited for; its cost is in Finish.
@@ -449,12 +530,14 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 	// line could not be read while the film played.
 
 	// How early a sample is asked for, how long a picture then takes from its sample to
-	// the GPU being done with it, and how many were not done at their present time.
-	if (m_bScheduled || m_bDlssNRActive || m_bDlssSRActive || m_MpvLuma.IsLoaded()) {
+	// the GPU being done with it, and how many the GPU was still finishing when Present was
+	// called. Those still reach their refresh unless On screen counts them shown late: it
+	// read "not in time", which was taken for pictures late on the screen.
+	if (m_bScheduled || m_bDlssNRActive || m_bDlssSRActive || m_bDlaaAfterActive || m_MpvLuma.IsLoaded()) {
 		if (!m_bDlssRenderAhead) {
 			str.append(L"\nRender ahead  : off");
 		} else if (m_RenderAhead.MeanLatencyMs() >= 0) {
-			str += std::format(L"\nRender ahead  : asked {:3.0f} ms early, ready in {:5.1f} (max {:5.1f}), {} not in time",
+			str += std::format(L"\nRender ahead  : {:3.0f} ms early, ready in {:5.1f} (max {:5.1f}), {} after Present",
 				m_RenderAhead.GetAhead() / 10000.0, m_RenderAhead.MeanLatencyMs(), m_RenderAhead.MaxLatencyMs(),
 				m_RenderAhead.LateCount());
 		}
@@ -485,9 +568,11 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 		str += std::format(L", scheduled: repeated {}, dropped {}, shown late {}",
 			m_PresentSchedule.RepeatedCount(), m_PresentSchedule.DroppedCount(), m_PresentSchedule.LateCount());
 		// The cadence slips placed, on a line of their own: on the line above they took it
-		// out of the box. On a scene change, not on one for want of one in time, and of those
-		// how many an interpolated frame covered and how many interpolated frames came too
-		// late to be shown. "Elsewhere" read as a place on the screen.
+		// out of the box. Each is a refresh more, and the line says how each ended: on a
+		// scene change, covered by an interpolated frame, or seen -- the picture before held
+		// a refresh more -- with how many of those had an interpolated frame that came too
+		// late to be shown. "Elsewhere" read as a place on the screen, and "7 not (6
+		// interpolated)" as a picture lost, the one left to be worked out.
 		if (m_iCadenceSlips != CADENCE_SLIPS_Off && !m_PresentSchedule.SlipsPlaced()
 				&& !m_PresentSchedule.SlipsOnCut() && !m_PresentSchedule.SlipsForced()) {
 			// 24 fps at 60Hz, 25 at 50Hz, a film at the screen's own rate: nothing owed often
@@ -495,13 +580,19 @@ std::wstring CDX11VideoProcessor::GetStatsText()
 			str += L"\nHiccups       : none owed at this rate";
 		} else if (m_iCadenceSlips != CADENCE_SLIPS_Off) {
 			// Short enough for three-digit counts, two hours of film, within the box.
-			str += std::format(L"\nHiccups       : {} on scene changes, {} not", m_PresentSchedule.SlipsOnCut(), m_PresentSchedule.SlipsForced());
+			const unsigned forced = m_PresentSchedule.SlipsForced();
+			str += std::format(L"\nHiccups       : {} on scene changes", m_PresentSchedule.SlipsOnCut());
 			if (m_iCadenceSlips == CADENCE_SLIPS_OnCutOrMade) {
-				str += std::format(L" ({} interpolated", m_PresentSchedule.MadeShown());
-				if (m_cadenceMadeLate) {
-					str += std::format(L", {} too late", m_cadenceMadeLate);
+				// A made picture is presented before the drawn one that counts its slip: for that
+				// moment the made ones are one ahead.
+				const unsigned made = std::min(m_PresentSchedule.MadeShown(), forced);
+				const unsigned seen = forced - made;
+				str += std::format(L", {} interpolated, {} visible", made, seen);
+				if (const unsigned late = std::min(m_PresentSchedule.MadeLateCount(), seen)) {
+					str += std::format(L" ({} too late)", late);
 				}
-				str += L')';
+			} else {
+				str += std::format(L", {} visible", forced);
 			}
 		}
 	} else
