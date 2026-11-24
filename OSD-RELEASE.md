@@ -1,22 +1,28 @@
-# MPCVR-Plus OSD v1.0.9
+# MPCVR-Plus OSD v1.0.10
 
-## Changes
+## Upstream updates
 
-- Merge upstream [MPCVR-Plus 3.0](https://github.com/HumbleUser33/MPCVR-Plus/releases/tag/MPCVR-Plus-3.0), preserving the complete Git merge history and including the 2.9 updates.
-- Add EWA Lanczos Sharp, EWA Ginseng, EWA Lanczos4 Sharpest chroma upsamplers, Anime4K CNN x2 M AR, optional moving dithering and HDR measured-peak scene-cut reset.
-- Include NVIDIA app RTX Video HDR / Super Resolution statistics, automatic FP16 textures for HDR output, and upstream frame-pacing and snapshot fixes.
-- Use upstream's accepted MPC-BE dark-settings implementation (PR #6). Dark and light settings pages retain native host styling without duplicate patches.
-- Retain the fork's color-coded OSD, audio and video metadata, low-frequency CPU/GPU sampling, and OSD-Plus 1.0.9 version labels.
-- Keep the lower-right synchronization graph hidden while preserving textual timing and dropped-frame statistics.
+Merged [MPCVR-Plus 3.2](https://github.com/HumbleUser33/MPCVR-Plus/releases/tag/MPCVR-Plus-3.2), including all 21 upstream commits since 3.0.
+
+- HDR curve: dedicated settings tab, presets, live strength adjustment (0–200%), display-peak control and HDR Auto Tune.
+- Post-scaling DLAA, DLAA after downscaling, and a 2/3 optical-flow resolution option.
+- Improved RTX Video Super Resolution reporting at native resolution, render-ahead and hiccup statistics.
+- Includes the 3.0.1 and 3.0.2 fixes for chroma upsampling, RTX Video HDR overexposure, Windows ACM compatibility with RTX VSR and DLSS 5 NR, and potential renderer deadlocks.
+
+## OSD Plus
+
+- Retains the independent OSD-Plus 1.0.10 label, color-coded OSD, audio metadata, and low-frequency CPU/GPU sampling.
+- Keeps the synchronization graph hidden while preserving textual timing statistics.
+- Retains the upstream MPC-BE dark-dialog integration, including the new HDR curve page.
 
 ## Acceptance and build provenance
 
-- User playback and settings acceptance completed for the `1.0.9` test build.
-- Source commit: `a1930290fbeb6d592f803a89b83201160515e519`.
-- Upstream tag: `MPCVR-Plus-3.0` (`3157c1123d0d20139cab8bbd28bcdd3c6412d928`).
-- [GitHub Actions OSD Plus build](https://github.com/rampageX/MPCVR-Plus/actions/runs/44296627370) succeeded for both Win32 and x64.
-- The release reuses the accepted binaries without recompilation. Only release metadata, documentation, and the restored publishing script differ from the accepted source snapshot.
+- User acceptance passed for the 1.0.10 test package.
+- Accepted source: `ecb0bdf698180241f3a7a765f968f2b00db01123`.
+- Upstream 3.2: `e5f1140d3375a0e14af6c98f8c6d77239dae66a2`.
+- [Win32 and x64 CI build](https://github.com/rampageX/MPCVR-Plus/actions/runs/45417451298) completed successfully.
+- The release reuses the accepted binaries without recompilation. Only release metadata and documentation are updated.
 
-## Package
+## Downloads
 
-Both Win32 and x64 filters, installation scripts, English documentation, build provenance, and SHA-256 checksums are included.
+The ZIP includes Win32 and x64 filters, installation scripts, upstream documentation and licenses, OSD Plus documentation, and BUILD-INFO.json. SHA256SUMS.txt is provided separately.

@@ -1,9 +1,9 @@
 # OSD Plus (rampageX fork)
 
-## Version 1.0.10 (test build)
+## Version 1.0.10
 
 Integrates the pinned MPCVR-Plus 3.2 release (`e5f1140d3375a0e14af6c98f8c6d77239dae66a2`),
-including the 3.0.1, 3.0.2 and 3.1 updates where present in upstream history.
+including the 3.0.1, 3.0.2 and 3.1 updates.
 Adds the HDR curve, HDR auto tune, post-scaling DLAA and updated OSD statistics.
 Retains the upstream MPC-BE dark-dialog implementation (PR #6), our independent
 OSD-Plus version label and hidden sync graph. Future updates remain ordinary Git merges.
